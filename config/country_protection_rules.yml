@@ -1,0 +1,27 @@
+# Country protection detection rules.
+# A company is flagged as "country-protected" if ANY condition is true.
+
+# Sectors considered strategically important by most governments.
+strategic_sectors:
+  - defense
+  - energy
+  - banking
+  - utilities
+  - telecom
+
+# Market cap threshold as a fraction of GDP.
+# e.g. 0.001 = company market cap > 0.1% of country GDP.
+market_cap_gdp_threshold: 0.001
+
+# Emergency policy-rate cut detection.
+# Trigger: central bank cut > this percentage within the lookback window.
+emergency_rate_cut_threshold: 2.0   # percentage points
+emergency_rate_cut_months: 3        # lookback window
+
+# Country survival mode thresholds (any true triggers country_survival_mode).
+country_survival:
+  credit_spread_pct: 5.0            # credit spread > 5%
+  unemployment_rise_pct: 3.0        # unemployment +3% in 6 months
+  unemployment_rise_months: 6
+  yield_curve_slope: -0.5           # yield curve slope < -0.5%
+  fx_volatility_pct: 20.0           # FX volatility > 20%

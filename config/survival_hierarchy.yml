@@ -1,0 +1,69 @@
+# Survival hierarchy tier definitions and weight presets.
+#
+# Five tiers ordered by importance during crisis:
+#   tier1: Liquidity & immediate solvency
+#   tier2: Debt structure & leverage
+#   tier3: Cash flow reality
+#   tier4: Profitability & operations
+#   tier5: Valuation & market sentiment
+
+tiers:
+  tier1:
+    label: "Liquidity & Solvency"
+    variables:
+      - current_ratio
+      - quick_ratio
+      - cash_ratio
+      - cash_and_equivalents
+  tier2:
+    label: "Debt Structure & Leverage"
+    variables:
+      - debt_to_equity_abs
+      - net_debt
+      - net_debt_to_ebitda
+      - total_debt_asof
+  tier3:
+    label: "Cash Flow Reality"
+    variables:
+      - free_cash_flow
+      - free_cash_flow_ttm_asof
+      - fcf_yield
+      - operating_cash_flow
+  tier4:
+    label: "Profitability & Operations"
+    variables:
+      - gross_margin
+      - operating_margin
+      - net_margin
+      - roe
+      - return_1d
+      - volatility_21d
+  tier5:
+    label: "Valuation & Market Sentiment"
+    variables:
+      - pe_ratio_calc
+      - ev_to_ebitda
+      - enterprise_value
+      - drawdown_252d
+
+# Weight presets per regime.
+# Weights are tier1 through tier5 and should sum to 1.0.
+regimes:
+  normal:
+    weights: [0.15, 0.15, 0.20, 0.25, 0.25]
+  company_survival:
+    weights: [0.35, 0.25, 0.20, 0.15, 0.05]
+  modified_survival:
+    # Country crisis, no company crisis.
+    weights: [0.25, 0.25, 0.20, 0.20, 0.10]
+  extreme_survival:
+    # Both company and country in crisis.
+    weights: [0.40, 0.30, 0.20, 0.08, 0.02]
+
+# Vanity-adjusted deltas.
+# When vanity_percentage exceeds the threshold, shift weight from tier5
+# toward tier3 (cash flow reality) by the delta amount.
+vanity_adjustment:
+  threshold: 10.0              # vanity_percentage above which deltas apply
+  tier3_delta: 0.05            # add to tier3
+  tier5_delta: -0.05           # subtract from tier5

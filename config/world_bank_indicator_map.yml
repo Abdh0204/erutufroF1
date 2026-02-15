@@ -1,0 +1,18 @@
+# Mapping: canonical_variable -> World Bank indicator code.
+# Used by the macro module to fetch country-level economic data.
+# Update this file (not code) to change indicator mappings.
+
+# Core indicators
+inflation_rate_yoy: FP.CPI.TOTL.ZG
+cpi_index: FP.CPI.TOTL
+unemployment_rate: SL.UEM.TOTL.ZS
+gdp_growth: NY.GDP.MKTP.KD.ZG
+gdp_current_usd: NY.GDP.MKTP.CD
+official_exchange_rate_lcu_per_usd: PA.NUS.FCRF
+current_account_balance_pct_gdp: BN.CAB.XOKA.GD.ZS
+reserves_months_of_imports: FI.RES.TOTL.MO
+
+# Optional proxy indicators
+real_interest_rate: FR.INR.RINR
+lending_interest_rate: FR.INR.LEND
+deposit_interest_rate: FR.INR.DPST
