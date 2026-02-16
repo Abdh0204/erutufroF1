@@ -1,69 +1,84 @@
 # Survival hierarchy tier definitions and weight presets.
 #
-# Five tiers ordered by importance during crisis:
-#   tier1: Liquidity & immediate solvency
-#   tier2: Debt structure & leverage
-#   tier3: Cash flow reality
-#   tier4: Profitability & operations
-#   tier5: Valuation & market sentiment
+# Five tiers ordered by importance during crisis (per spec):
+#   tier1: Liquidity & Cash (highest priority in survival)
+#   tier2: Debt & Solvency
+#   tier3: Market Stability
+#   tier4: Profitability (lower priority in survival)
+#   tier5: Growth & Valuation (lowest priority in survival)
 
 tiers:
   tier1:
-    label: "Liquidity & Solvency"
+    label: "Liquidity & Cash"
     variables:
-      - current_ratio
-      - quick_ratio
+      - cash_and_equivalents_asof
       - cash_ratio
-      - cash_and_equivalents
+      - free_cash_flow_ttm
+      - operating_cash_flow_asof
   tier2:
-    label: "Debt Structure & Leverage"
+    label: "Debt & Solvency"
     variables:
-      - debt_to_equity_abs
-      - net_debt
-      - net_debt_to_ebitda
       - total_debt_asof
+      - debt_to_equity
+      - net_debt_to_ebitda
+      - interest_coverage
+      - current_ratio
   tier3:
-    label: "Cash Flow Reality"
+    label: "Market Stability"
     variables:
-      - free_cash_flow
-      - free_cash_flow_ttm_asof
-      - fcf_yield
-      - operating_cash_flow
+      - volatility_21d
+      - drawdown_252d
+      - volume
   tier4:
-    label: "Profitability & Operations"
+    label: "Profitability"
     variables:
       - gross_margin
       - operating_margin
       - net_margin
-      - roe
-      - return_1d
-      - volatility_21d
   tier5:
-    label: "Valuation & Market Sentiment"
+    label: "Growth & Valuation"
     variables:
-      - pe_ratio_calc
+      - revenue_asof
+      - pe_ratio
       - ev_to_ebitda
-      - enterprise_value
-      - drawdown_252d
 
 # Weight presets per regime.
-# Weights are tier1 through tier5 and should sum to 1.0.
+# Weights are tier1 through tier5 and must sum to 1.0.
+#
+# Source: The_Apps_core_idea.pdf Section C.3-C.4.
+#
+# Case 1 -- Normal Company, Normal Country:
+#   Standard equal weights.
+# Case 2 -- Survival Company, Normal Country:
+#   Company in distress, environment stable. Focus: liquidity management.
+# Case 3 -- Normal Company, Survival Country (NOT protected):
+#   Company healthy but environment toxic. Focus: defensive positioning.
+# Case 3b -- Normal Company, Survival Country (protected):
+#   Uses standard weights (company is shielded by government).
+#   Handled in code: regime selector returns "normal" when protected.
+# Case 4 -- Survival Company, Survival Country:
+#   Both in crisis. Focus: immediate survival only.
 regimes:
   normal:
-    weights: [0.15, 0.15, 0.20, 0.25, 0.25]
+    weights: [0.20, 0.20, 0.20, 0.20, 0.20]
   company_survival:
-    weights: [0.35, 0.25, 0.20, 0.15, 0.05]
+    weights: [0.50, 0.30, 0.15, 0.04, 0.01]
   modified_survival:
-    # Country crisis, no company crisis.
-    weights: [0.25, 0.25, 0.20, 0.20, 0.10]
+    # Country crisis, company healthy, NOT protected.
+    weights: [0.40, 0.35, 0.20, 0.04, 0.01]
   extreme_survival:
     # Both company and country in crisis.
-    weights: [0.40, 0.30, 0.20, 0.08, 0.02]
+    weights: [0.60, 0.30, 0.10, 0.00, 0.00]
 
 # Vanity-adjusted deltas.
-# When vanity_percentage exceeds the threshold, shift weight from tier5
-# toward tier3 (cash flow reality) by the delta amount.
+# When vanity_percentage exceeds the threshold AND the company is in a
+# survival regime, shift weight from Tier 4 and Tier 5 toward Tier 1.
+#
+# Source: The_Apps_core_idea.pdf Section C.6 --
+#   "move 2% from Tier 4 and 3% from Tier 5 to Tier 1"
+#   New weights become: 55/30/15/2/0 (even more emphasis on liquidity)
 vanity_adjustment:
   threshold: 10.0              # vanity_percentage above which deltas apply
-  tier3_delta: 0.05            # add to tier3
-  tier5_delta: -0.05           # subtract from tier5
+  tier1_delta: 0.05            # add to tier1 (liquidity)
+  tier4_delta: -0.02           # subtract from tier4 (profitability)
+  tier5_delta: -0.03           # subtract from tier5 (growth/valuation)

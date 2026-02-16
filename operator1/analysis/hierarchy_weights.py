@@ -4,14 +4,16 @@ For each day, selects a **regime** based on the survival flags computed
 by T4.1 and looks up the corresponding tier weight vector from
 ``config/survival_hierarchy.yml``.
 
-Regime selection logic:
-  - Neither company nor country flag -> ``normal``
-  - Company flag only                -> ``company_survival``
-  - Country flag only (no protection)-> ``modified_survival``
-  - Both flags                       -> ``extreme_survival``
+Regime selection logic (per The_Apps_core_idea.pdf Section C.4):
+  - Neither company nor country flag              -> ``normal``
+  - Company flag only                             -> ``company_survival``
+  - Country flag only, company NOT protected      -> ``modified_survival``
+  - Country flag only, company IS protected       -> ``normal``
+  - Both flags                                    -> ``extreme_survival``
 
-When ``vanity_percentage`` exceeds the configured threshold, a small
-weight delta shifts from tier 5 to tier 3.
+When ``vanity_percentage`` exceeds the configured threshold **and** the
+company is in a survival regime, weight is shifted from Tier 4/5 to
+Tier 1 (per Section C.6 of the spec).
 
 Output columns:
   - ``survival_regime`` (categorical label)
@@ -70,8 +72,11 @@ def _select_regime(
     if company and not country:
         return "company_survival"
     if not company and country:
-        # Country crisis only; if protected, use modified_survival
-        # (protection reduces the severity of weight shifts)
+        # Country crisis only.  Per spec Section C.4 Case 3/3b:
+        # - If protected by government -> use standard (normal) weights.
+        # - If NOT protected -> use modified_survival weights.
+        if protected:
+            return "normal"
         return "modified_survival"
     # Both company and country in crisis
     return "extreme_survival"
@@ -108,12 +113,15 @@ def select_regime_series(df: pd.DataFrame) -> pd.Series:
         ~((company == 1) & (country == 0)),
         other="company_survival",
     )
-    # Country only
+    # Country only, NOT protected -> modified_survival
     regimes = regimes.where(
-        ~((company == 0) & (country == 1)),
+        ~((company == 0) & (country == 1) & (protected == 0)),
         other="modified_survival",
     )
-    # Both
+    # Country only, IS protected -> stays "normal" (no change needed,
+    # already defaulted to "normal")
+
+    # Both company and country in crisis
     regimes = regimes.where(
         ~((company == 1) & (country == 1)),
         other="extreme_survival",
@@ -144,12 +152,14 @@ def _get_weight_vector(
 def _apply_vanity_adjustment(
     weights: list[float],
     vanity_pct: float,
+    regime: str,
     vanity_cfg: dict[str, Any],
 ) -> list[float]:
     """Adjust tier weights based on vanity percentage.
 
-    When ``vanity_pct`` exceeds the threshold, shift weight from tier 5
-    to tier 3 by the configured delta amounts.
+    Per spec Section C.6: when ``vanity_pct`` exceeds the threshold
+    **and** the company is in a survival regime, shift weight from
+    Tier 4 and Tier 5 toward Tier 1 (liquidity).
 
     Parameters
     ----------
@@ -157,6 +167,8 @@ def _apply_vanity_adjustment(
         Current 5-element weight list.
     vanity_pct:
         The vanity percentage for this day.
+    regime:
+        The survival regime label for this day.
     vanity_cfg:
         The ``vanity_adjustment`` section from config.
 
@@ -169,12 +181,18 @@ def _apply_vanity_adjustment(
     if np.isnan(vanity_pct) or vanity_pct <= threshold:
         return weights
 
-    tier3_delta = vanity_cfg.get("tier3_delta", 0.05)
-    tier5_delta = vanity_cfg.get("tier5_delta", -0.05)
+    # Only apply vanity adjustment in survival regimes (not normal mode).
+    if regime == "normal":
+        return weights
+
+    tier1_delta = vanity_cfg.get("tier1_delta", 0.05)
+    tier4_delta = vanity_cfg.get("tier4_delta", -0.02)
+    tier5_delta = vanity_cfg.get("tier5_delta", -0.03)
 
     adjusted = list(weights)
-    # tier3 is index 2, tier5 is index 4
-    adjusted[2] = adjusted[2] + tier3_delta
+    # tier1 is index 0, tier4 is index 3, tier5 is index 4
+    adjusted[0] = adjusted[0] + tier1_delta
+    adjusted[3] = adjusted[3] + tier4_delta
     adjusted[4] = adjusted[4] + tier5_delta
 
     # Clamp to non-negative
@@ -246,9 +264,9 @@ def compute_hierarchy_weights(
         regime = result["survival_regime"].iloc[idx]
         base_weights = list(regime_weights_cache.get(regime, [0.2] * _NUM_TIERS))
 
-        # Apply vanity adjustment
+        # Apply vanity adjustment (only active in survival regimes)
         vp = vanity_pct.iloc[idx]
-        adjusted = _apply_vanity_adjustment(base_weights, vp, vanity_cfg)
+        adjusted = _apply_vanity_adjustment(base_weights, vp, regime, vanity_cfg)
 
         for tier_idx in range(_NUM_TIERS):
             col = f"hierarchy_tier{tier_idx+1}_weight"

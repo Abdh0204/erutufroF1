@@ -453,10 +453,15 @@ class TestRegimeSelection(unittest.TestCase):
         from operator1.analysis.hierarchy_weights import _select_regime
         self.assertEqual(_select_regime(1, 1, 0), "extreme_survival")
 
-    def test_protected_modified(self):
+    def test_protected_uses_normal(self):
         from operator1.analysis.hierarchy_weights import _select_regime
-        # Country crisis + protected still = modified_survival
-        self.assertEqual(_select_regime(0, 1, 1), "modified_survival")
+        # Country crisis + protected -> "normal" (shielded by government)
+        self.assertEqual(_select_regime(0, 1, 1), "normal")
+
+    def test_not_protected_uses_modified(self):
+        from operator1.analysis.hierarchy_weights import _select_regime
+        # Country crisis + NOT protected -> "modified_survival"
+        self.assertEqual(_select_regime(0, 1, 0), "modified_survival")
 
 
 class TestRegimeSeriesSelection(unittest.TestCase):
@@ -465,15 +470,17 @@ class TestRegimeSeriesSelection(unittest.TestCase):
     def test_mixed_regimes(self):
         from operator1.analysis.hierarchy_weights import select_regime_series
         df = pd.DataFrame({
-            "company_survival_mode_flag": [0, 1, 0, 1],
-            "country_survival_mode_flag": [0, 0, 1, 1],
-            "country_protected_flag":     [0, 0, 0, 0],
-        }, index=_make_daily_index(4))
+            "company_survival_mode_flag": [0, 1, 0, 0, 1],
+            "country_survival_mode_flag": [0, 0, 1, 1, 1],
+            "country_protected_flag":     [0, 0, 0, 1, 0],
+        }, index=_make_daily_index(5))
         regimes = select_regime_series(df)
         self.assertEqual(regimes.iloc[0], "normal")
         self.assertEqual(regimes.iloc[1], "company_survival")
         self.assertEqual(regimes.iloc[2], "modified_survival")
-        self.assertEqual(regimes.iloc[3], "extreme_survival")
+        # Country crisis + protected -> normal (shielded)
+        self.assertEqual(regimes.iloc[3], "normal")
+        self.assertEqual(regimes.iloc[4], "extreme_survival")
 
 
 class TestHierarchyWeights(unittest.TestCase):
@@ -495,9 +502,9 @@ class TestHierarchyWeights(unittest.TestCase):
         # All days should be normal
         self.assertTrue((result["survival_regime"] == "normal").all())
 
-        # Normal weights from config: [0.15, 0.15, 0.20, 0.25, 0.25]
-        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.15)
-        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.25)
+        # Normal weights from config: [0.20, 0.20, 0.20, 0.20, 0.20]
+        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.20)
+        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.20)
 
     def test_weights_sum_to_one(self):
         from operator1.analysis.hierarchy_weights import compute_hierarchy_weights
@@ -524,39 +531,53 @@ class TestHierarchyWeights(unittest.TestCase):
         result = compute_hierarchy_weights(df)
         self.assertTrue((result["survival_regime"] == "extreme_survival").all())
 
-        # Extreme weights: [0.40, 0.30, 0.20, 0.08, 0.02]
-        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.40)
+        # Extreme weights: [0.60, 0.30, 0.10, 0.00, 0.00]
+        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.60)
         self.assertAlmostEqual(result["hierarchy_tier2_weight"].iloc[0], 0.30)
 
-    def test_vanity_adjustment_shifts_weights(self):
+    def test_vanity_adjustment_shifts_weights_in_survival(self):
         from operator1.analysis.hierarchy_weights import compute_hierarchy_weights
         df = _make_feature_df(5)
-        df["company_survival_mode_flag"] = 0
+        df["company_survival_mode_flag"] = 1  # must be in survival for vanity adj
         df["country_survival_mode_flag"] = 0
         df["country_protected_flag"] = 0
         df["vanity_percentage"] = 15.0  # above 10% threshold
 
         result = compute_hierarchy_weights(df)
 
-        # Normal weights: [0.15, 0.15, 0.20, 0.25, 0.25]
-        # After vanity adj: tier3 += 0.05, tier5 -= 0.05
-        # -> [0.15, 0.15, 0.25, 0.25, 0.20] then normalised
-        # Sum = 1.0 already so no normalisation change
-        self.assertAlmostEqual(result["hierarchy_tier3_weight"].iloc[0], 0.25, places=4)
-        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.20, places=4)
+        # Company survival weights: [0.50, 0.30, 0.15, 0.04, 0.01]
+        # After vanity adj: tier1 += 0.05, tier4 -= 0.02, tier5 -= 0.03
+        # -> [0.55, 0.30, 0.15, 0.02, -0.02] -> clamped -> [0.55, 0.30, 0.15, 0.02, 0.00]
+        # Sum = 1.02, normalised -> [0.5392, 0.2941, 0.1471, 0.0196, 0.0]
+        self.assertGreater(result["hierarchy_tier1_weight"].iloc[0], 0.50)
+        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.0, places=4)
 
-    def test_vanity_below_threshold_no_change(self):
+    def test_vanity_no_adjustment_in_normal_regime(self):
         from operator1.analysis.hierarchy_weights import compute_hierarchy_weights
         df = _make_feature_df(5)
         df["company_survival_mode_flag"] = 0
         df["country_survival_mode_flag"] = 0
         df["country_protected_flag"] = 0
+        df["vanity_percentage"] = 15.0  # above threshold, but normal regime
+
+        result = compute_hierarchy_weights(df)
+        # Vanity adjustment should NOT apply in normal regime.
+        # Should be unmodified normal weights: [0.20, 0.20, 0.20, 0.20, 0.20]
+        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.20)
+        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.20)
+
+    def test_vanity_below_threshold_no_change(self):
+        from operator1.analysis.hierarchy_weights import compute_hierarchy_weights
+        df = _make_feature_df(5)
+        df["company_survival_mode_flag"] = 1
+        df["country_survival_mode_flag"] = 0
+        df["country_protected_flag"] = 0
         df["vanity_percentage"] = 5.0  # below 10% threshold
 
         result = compute_hierarchy_weights(df)
-        # Should be unmodified normal weights
-        self.assertAlmostEqual(result["hierarchy_tier3_weight"].iloc[0], 0.20)
-        self.assertAlmostEqual(result["hierarchy_tier5_weight"].iloc[0], 0.25)
+        # Should be unmodified company_survival weights: [0.50, 0.30, 0.15, 0.04, 0.01]
+        self.assertAlmostEqual(result["hierarchy_tier1_weight"].iloc[0], 0.50)
+        self.assertAlmostEqual(result["hierarchy_tier4_weight"].iloc[0], 0.04)
 
     def test_all_four_regimes_in_one_table(self):
         from operator1.analysis.hierarchy_weights import compute_hierarchy_weights

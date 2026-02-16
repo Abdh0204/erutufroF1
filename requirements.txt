@@ -13,18 +13,25 @@ scikit-learn>=1.2
 ruptures>=1.1
 hmmlearn>=0.3
 
-# T6.2+ (install when needed)
-# arch>=6.0
-# xgboost>=1.7
-# torch>=2.0
-# pymc>=5.0
-# SALib>=1.4
-# TA-Lib>=0.4
-# deap>=1.4
+# T6.2: forecasting models (actively used in forecasting.py)
+arch>=6.0
+xgboost>=1.7
+torch>=2.0
 
-# Report generation (Phase 7)
-# matplotlib>=3.6
+# T6.1: Bayesian change-point detection (used in regime_detector.py)
+pymc>=5.0
+
+# Not yet implemented -- uncomment when adding these modules:
+# SALib>=1.4          # Sobol sensitivity analysis
+# TA-Lib>=0.4         # Candlestick pattern detection
+# deap>=1.4           # Genetic algorithm optimisation
+# pywt>=1.4           # Wavelet decomposition
+
+# Report generation (Phase 7, used in report_generator.py)
+matplotlib>=3.6
+
+# Not yet used:
 # plotly>=5.13
 
 # Testing
-# pytest>=7.0
+pytest>=7.0
