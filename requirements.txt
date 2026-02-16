@@ -5,6 +5,7 @@ pandas>=1.5
 numpy>=1.23
 pyarrow>=10.0
 pyyaml>=6.0
+python-dotenv>=1.0  # .env file support for local development
 
 # Temporal modeling -- Phase 6
 # T6.1: regime detection + causality
