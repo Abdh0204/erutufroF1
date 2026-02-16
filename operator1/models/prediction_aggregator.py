@@ -46,7 +46,10 @@ import pandas as pd
 from operator1.constants import CACHE_DIR
 from operator1.models.forecasting import (
     HORIZONS,
+    BaseModelWrapper,
+    BaselineWrapper,
     ForecastResult,
+    ForwardPassResult,
     ModelMetrics,
 )
 from operator1.models.monte_carlo import MonteCarloResult
@@ -622,6 +625,256 @@ def _safe_float(val: float) -> float | None:
     if isinstance(val, float) and math.isnan(val):
         return None
     return val
+
+
+# ===========================================================================
+# D5: Iterative multi-step prediction (chain day predictions)
+# ===========================================================================
+
+
+@dataclass
+class StepPrediction:
+    """Single prediction for one step in the iterative chain."""
+
+    step: int = 0  # 1-indexed
+    point_forecast: dict[str, float] = field(default_factory=dict)
+    lower_ci: dict[str, float] = field(default_factory=dict)
+    upper_ci: dict[str, float] = field(default_factory=dict)
+    regime_probabilities: dict[str, float] = field(default_factory=dict)
+
+
+def iterative_multi_step_predict(
+    models: dict[str, BaseModelWrapper],
+    initial_state: pd.Series,
+    hierarchy_weights: dict[str, float] | None = None,
+    horizon_days: int = 5,
+    mc_scenarios: int = 1000,
+    *,
+    regime_return_std: float | None = None,
+) -> list[StepPrediction]:
+    """Generate multi-step predictions by iterative chaining.
+
+    For each step ``s`` in ``[1, horizon_days]``:
+    1. Use model ensemble to predict state at step *s* from step *s-1*.
+    2. Add noise sampled from regime-conditional distribution (Monte Carlo).
+    3. Feed predicted state as input for step *s+1*.
+    4. Collect all intermediate predictions with uncertainty bands.
+
+    Parameters
+    ----------
+    models:
+        Dict of ``variable_name -> ModelWrapper`` from the forward pass /
+        burn-out.
+    initial_state:
+        The last observed day's state vector (Series with variable names
+        as index).
+    hierarchy_weights:
+        Current tier weights for weighting predictions.
+    horizon_days:
+        Number of days to predict forward.
+    mc_scenarios:
+        Number of Monte Carlo paths for uncertainty estimation.
+    regime_return_std:
+        Standard deviation to use for noise injection.  If ``None``,
+        defaults to 2% of the variable value (or 0.02 if value is near zero).
+
+    Returns
+    -------
+    List of ``StepPrediction``, one per day in the horizon.
+    """
+    if hierarchy_weights is None:
+        hierarchy_weights = {f"tier{i}": 20.0 for i in range(1, 6)}
+
+    variables = list(models.keys())
+    if not variables:
+        return []
+
+    results: list[StepPrediction] = []
+
+    # Build the initial state vector
+    current_values: dict[str, float] = {}
+    for var in variables:
+        val = initial_state.get(var, 0.0) if var in initial_state.index else 0.0
+        current_values[var] = float(val) if not (isinstance(val, float) and math.isnan(val)) else 0.0
+
+    # --- Deterministic chain (point forecast) ---
+    point_chain: list[dict[str, float]] = []
+    state = dict(current_values)
+
+    for step in range(1, horizon_days + 1):
+        step_forecast: dict[str, float] = {}
+        for var in variables:
+            wrapper = models.get(var)
+            if wrapper is None:
+                step_forecast[var] = state.get(var, 0.0)
+                continue
+            try:
+                state_arr = np.array([state.get(var, 0.0)])
+                pred = wrapper.predict(state_arr)
+                step_forecast[var] = float(pred[0]) if len(pred) > 0 else state.get(var, 0.0)
+            except Exception:
+                step_forecast[var] = state.get(var, 0.0)
+        point_chain.append(step_forecast)
+        state = dict(step_forecast)
+
+    # --- Monte Carlo uncertainty (stochastic paths) ---
+    # Run mc_scenarios parallel chains, adding noise at each step
+    all_paths: list[list[dict[str, float]]] = []
+
+    for _ in range(mc_scenarios):
+        mc_state = dict(current_values)
+        mc_path: list[dict[str, float]] = []
+
+        for step in range(horizon_days):
+            step_forecast: dict[str, float] = {}
+            for var in variables:
+                base_val = mc_state.get(var, 0.0)
+                # Noise scale: 2% of value or configurable
+                if regime_return_std is not None:
+                    noise_std = regime_return_std
+                else:
+                    noise_std = max(abs(base_val) * 0.02, 0.001)
+
+                noise = np.random.normal(0, noise_std)
+                # Use the deterministic point forecast + noise
+                det_val = point_chain[step].get(var, base_val)
+                step_forecast[var] = det_val + noise
+
+            mc_path.append(step_forecast)
+            mc_state = dict(step_forecast)
+
+        all_paths.append(mc_path)
+
+    # --- Assemble StepPrediction objects ---
+    for step_idx in range(horizon_days):
+        step_num = step_idx + 1
+        point = point_chain[step_idx]
+
+        # Compute percentiles from MC paths
+        lower_ci: dict[str, float] = {}
+        upper_ci: dict[str, float] = {}
+
+        for var in variables:
+            mc_values = [path[step_idx].get(var, 0.0) for path in all_paths]
+            mc_arr = np.array(mc_values)
+            lower_ci[var] = float(np.percentile(mc_arr, 5))
+            upper_ci[var] = float(np.percentile(mc_arr, 95))
+
+        results.append(StepPrediction(
+            step=step_num,
+            point_forecast=point,
+            lower_ci=lower_ci,
+            upper_ci=upper_ci,
+            regime_probabilities={},
+        ))
+
+    return results
+
+
+def build_multi_horizon_predictions(
+    models: dict[str, BaseModelWrapper],
+    cache: pd.DataFrame,
+    hierarchy_weights: dict[str, float] | None = None,
+    mc_scenarios: int = 500,
+) -> dict[str, Any]:
+    """Convenience wrapper generating predictions for all standard horizons.
+
+    Produces ``predictions_next_day``, ``predictions_next_week``,
+    ``predictions_next_month``, ``predictions_next_year`` in the format
+    expected by the company profile builder.
+
+    Technical Alpha protection: next-day masks OHLC except Low.
+
+    Parameters
+    ----------
+    models:
+        Dict of ``variable_name -> ModelWrapper``.
+    cache:
+        Full daily cache (used to extract initial state and volatility).
+    hierarchy_weights:
+        Current tier weights.
+    mc_scenarios:
+        Number of Monte Carlo paths.
+
+    Returns
+    -------
+    Dict with keys ``next_day``, ``next_week``, ``next_month``, ``next_year``.
+    """
+    if len(cache) == 0:
+        return {}
+
+    initial_state = cache.iloc[-1]
+
+    # Estimate regime-conditional noise from recent volatility
+    regime_std = None
+    if "volatility_21d" in cache.columns:
+        vol = cache["volatility_21d"].dropna()
+        if len(vol) > 0:
+            regime_std = float(vol.iloc[-1]) / np.sqrt(252)  # daily vol
+
+    horizons = {"next_day": 1, "next_week": 5, "next_month": 21, "next_year": 252}
+    output: dict[str, Any] = {}
+
+    for label, days in horizons.items():
+        try:
+            steps = iterative_multi_step_predict(
+                models=models,
+                initial_state=initial_state,
+                hierarchy_weights=hierarchy_weights,
+                horizon_days=days,
+                mc_scenarios=mc_scenarios,
+                regime_return_std=regime_std,
+            )
+        except Exception as exc:
+            logger.warning("Iterative prediction failed for %s: %s -- using fallback", label, exc)
+            # Fallback: use last known values
+            steps = [StepPrediction(
+                step=s + 1,
+                point_forecast={v: float(initial_state.get(v, 0.0)) for v in models},
+                lower_ci={v: float(initial_state.get(v, 0.0)) * 0.95 for v in models},
+                upper_ci={v: float(initial_state.get(v, 0.0)) * 1.05 for v in models},
+            ) for s in range(days)]
+
+        horizon_data: dict[str, Any] = {
+            "steps": len(steps),
+            "date_range_days": days,
+        }
+
+        if steps:
+            # Point forecasts for final step
+            final_step = steps[-1]
+            horizon_data["point_forecast"] = final_step.point_forecast
+            horizon_data["lower_ci"] = final_step.lower_ci
+            horizon_data["upper_ci"] = final_step.upper_ci
+
+            # OHLC-style series (simplified: use close proxy from point forecasts)
+            if "close" in models:
+                ohlc_series = []
+                for s in steps:
+                    close_val = s.point_forecast.get("close", 0.0)
+                    lo = s.lower_ci.get("close", close_val * 0.99)
+                    hi = s.upper_ci.get("close", close_val * 1.01)
+                    ohlc_series.append({
+                        "step": s.step,
+                        "open": close_val,  # simplified: open = predicted close
+                        "high": hi,
+                        "low": lo,
+                        "close": close_val,
+                    })
+
+                # Technical Alpha protection for next_day
+                if label == "next_day" and ohlc_series:
+                    for candle in ohlc_series:
+                        candle["open"] = "MASKED - Technical Alpha Protection"
+                        candle["high"] = "MASKED - Technical Alpha Protection"
+                        candle["close"] = "MASKED - Technical Alpha Protection"
+                        # Only Low is exposed
+
+                horizon_data["ohlc_series"] = ohlc_series
+
+        output[label] = horizon_data
+
+    return output
 
 
 # ===========================================================================

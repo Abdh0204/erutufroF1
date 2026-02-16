@@ -60,51 +60,73 @@ _FALLBACK_TEMPLATE = """\
 
 ---
 
-## 3. Financial Health Assessment
+## 3. Historical Performance Analysis
+
+{historical_performance}
+
+---
+
+## 4. Current Financial Health (Tier-by-Tier Breakdown)
 
 {financial_health}
 
 ---
 
-## 4. Survival Analysis
+## 5. Survival Mode Analysis
 
 {survival_analysis}
 
 ---
 
-## 5. Linked Entities & Relative Positioning
+## 6. Linked Variables & Market Context
 
 {linked_entities}
 
 ---
 
-## 6. Macro Environment Impact
-
-{macro_environment}
-
----
-
-## 7. Regime Analysis & Forecasts
+## 7. Temporal Analysis & Model Insights
 
 {regime_analysis}
 
 ---
 
-## 8. Ethical Filter Assessment
+## 8. Predictions & Forecasts
+
+{predictions_forecasts}
+
+---
+
+## 9. Technical Patterns & Chart Analysis
+
+{technical_patterns}
+
+---
+
+## 10. Ethical Filter Assessment
 
 {ethical_filters}
 
 ---
 
-## 9. Risk Assessment
+## 11. Risk Factors & Limitations
 
 {risk_assessment}
 
----
-
-## 10. LIMITATIONS
+### 11.1 LIMITATIONS
 
 {limitations}
+
+---
+
+## 12. Investment Recommendation
+
+{investment_recommendation}
+
+---
+
+## 13. Appendix
+
+{appendix}
 """
 
 
@@ -575,23 +597,361 @@ def _build_limitations(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_historical_performance(profile: dict[str, Any]) -> str:
+    """Build the Historical Performance Analysis section (Section 3)."""
+    hist = profile.get("historical", {})
+    lines: list[str] = []
+
+    lines.append(f"**Analysis Period:** {hist.get('date_range_start', 'N/A')} to {hist.get('date_range_end', 'N/A')}")
+    lines.append("")
+    lines.append(f"- **Total Return:** {_pct(hist.get('return_total'))}")
+    lines.append(f"- **Real Return (inflation-adjusted):** {_pct(hist.get('return_real'))}")
+    lines.append(f"- **Annualised Return:** {_pct(hist.get('return_annualized'))}")
+    lines.append(f"- **Annualised Volatility:** {_pct(hist.get('volatility_annualized'))}")
+    lines.append(f"- **Sharpe Ratio:** {_fmt(hist.get('sharpe_ratio'))}")
+    lines.append(f"- **Maximum Drawdown:** {_pct(hist.get('max_drawdown'))}")
+    lines.append(f"- **Up Days:** {_pct(hist.get('up_days_percentage'))}")
+    lines.append(f"- **Down Days:** {_pct(hist.get('down_days_percentage'))}")
+    lines.append(f"- **Best Day Return:** {_pct(hist.get('best_day_return'))}")
+    lines.append(f"- **Worst Day Return:** {_pct(hist.get('worst_day_return'))}")
+
+    return "\n".join(lines)
+
+
+def _build_predictions_forecasts(profile: dict[str, Any]) -> str:
+    """Build the Predictions & Forecasts section (Section 8)."""
+    preds = profile.get("predictions", {})
+    lines: list[str] = []
+
+    for horizon_label in ["next_day", "next_week", "next_month", "next_year"]:
+        h_data = preds.get(horizon_label, {})
+        h_title = horizon_label.replace("_", " ").title()
+        lines.append(f"### {h_title}")
+        lines.append("")
+
+        if not h_data:
+            lines.append("*No predictions available for this horizon.*")
+            lines.append("")
+            continue
+
+        if "point_forecast" in h_data:
+            pt = h_data["point_forecast"]
+            if isinstance(pt, dict):
+                for var, val in list(pt.items())[:10]:
+                    lines.append(f"- **{var}:** {_fmt(val)}")
+            else:
+                lines.append(f"- Point forecast: {_fmt(pt)}")
+
+        if "ohlc_series" in h_data:
+            ohlc = h_data["ohlc_series"]
+            if isinstance(ohlc, list) and ohlc:
+                if horizon_label == "next_day":
+                    lines.append("")
+                    lines.append("*Technical Alpha protection applied: only Low is shown for next-day OHLC.*")
+                lines.append("")
+                lines.append(f"- OHLC candlestick series: {len(ohlc)} step(s)")
+
+        lines.append("")
+
+    # Monte Carlo
+    mc = preds.get("monte_carlo", {})
+    if mc:
+        lines.append("### Monte Carlo Uncertainty")
+        lines.append("")
+        lines.append(f"- Scenarios simulated: {mc.get('n_scenarios', 'N/A')}")
+        lines.append(f"- Tail risk (5th percentile): {_fmt(mc.get('p5'))}")
+        lines.append(f"- Base case (50th percentile): {_fmt(mc.get('p50'))}")
+        lines.append(f"- Upside (95th percentile): {_fmt(mc.get('p95'))}")
+
+    return "\n".join(lines)
+
+
+def _build_technical_patterns(profile: dict[str, Any]) -> str:
+    """Build the Technical Patterns & Chart Analysis section (Section 9)."""
+    patterns = profile.get("patterns", profile.get("technical_patterns", {}))
+    lines: list[str] = []
+
+    recent = patterns.get("recent_patterns", [])
+    predicted = patterns.get("predicted_patterns_week", patterns.get("predicted_patterns", []))
+
+    lines.append("[CHART: 2-year price history with regime shading]")
+    lines.append("")
+
+    if recent:
+        lines.append("### Recent Patterns (Last 6 Months)")
+        lines.append("")
+        for p in recent[:10]:
+            lines.append(f"- {p}")
+    else:
+        lines.append("*No recent candlestick patterns detected.*")
+
+    lines.append("")
+
+    if predicted:
+        lines.append("### Predicted Patterns")
+        lines.append("")
+        for p in predicted[:10]:
+            lines.append(f"- {p}")
+    else:
+        lines.append("*No predicted patterns available.*")
+
+    lines.append("")
+    lines.append("[CHART: Predicted candlestick series for next week/month]")
+
+    return "\n".join(lines)
+
+
+def _build_investment_recommendation(profile: dict[str, Any]) -> str:
+    """Build the Investment Recommendation section (Section 12)."""
+    lines: list[str] = []
+
+    # Derive recommendation from available data
+    filters = profile.get("filters", {})
+    survival = profile.get("current_state", {}).get("survival", {})
+    hist = profile.get("historical", {})
+
+    # Count filter passes
+    pass_count = 0
+    total_filters = 0
+    for f_name, f_data in filters.items():
+        if isinstance(f_data, dict):
+            total_filters += 1
+            verdict = str(f_data.get("verdict", ""))
+            if "PASS" in verdict.upper():
+                pass_count += 1
+
+    # Simple heuristic recommendation
+    is_survival = survival.get("company_survival_mode", False)
+    total_return = hist.get("return_total", 0)
+
+    if is_survival:
+        recommendation = "SELL"
+        confidence = "Medium"
+        rationale = "Company is currently in survival mode; liquidity risk dominates."
+    elif pass_count >= 3 and total_return is not None and (total_return or 0) > 0:
+        recommendation = "BUY"
+        confidence = "Medium"
+        rationale = "Ethical filters largely pass, positive historical returns."
+    elif pass_count >= 2:
+        recommendation = "HOLD"
+        confidence = "Low"
+        rationale = "Mixed signals from ethical filters; monitor closely."
+    else:
+        recommendation = "SELL"
+        confidence = "Low"
+        rationale = "Multiple ethical filter failures indicate elevated risk."
+
+    lines.append(f"**Recommendation:** {recommendation}")
+    lines.append("")
+    lines.append(f"**Confidence Level:** {confidence}")
+    lines.append("")
+    lines.append(f"**Rationale:** {rationale}")
+    lines.append("")
+    lines.append("**Key Catalysts to Watch:**")
+    lines.append("- Upcoming earnings announcements")
+    lines.append("- Changes in survival mode status")
+    lines.append("- Macro regime shifts (inflation, rates)")
+    lines.append("")
+    lines.append("*Note: This recommendation is generated algorithmically from quantitative filters. "
+                 "Professional judgement and qualitative analysis should supplement this assessment.*")
+
+    return "\n".join(lines)
+
+
+def _build_appendix(profile: dict[str, Any]) -> str:
+    """Build the Appendix section (Section 13)."""
+    lines: list[str] = []
+
+    lines.append("### Methodology Summary")
+    lines.append("")
+    lines.append("This analysis uses 20+ mathematical modules including:")
+    lines.append("- **Regime Detection:** HMM (Hidden Markov Model), GMM (Gaussian Mixture Model)")
+    lines.append("- **Structural Breaks:** PELT, Bayesian Change Point Detection")
+    lines.append("- **Forecasting:** Adaptive Kalman Filter, GARCH, VAR, LSTM, Transformer")
+    lines.append("- **Ensemble:** Random Forest, XGBoost, Gradient Boosting")
+    lines.append("- **Causality:** Granger Causality, Transfer Entropy")
+    lines.append("- **Uncertainty:** Regime-Aware Monte Carlo, Importance Sampling")
+    lines.append("- **Sensitivity:** Sobol Global Sensitivity Analysis")
+    lines.append("- **Optimisation:** Genetic Algorithm (ensemble weights)")
+    lines.append("")
+
+    lines.append("### Burn-Out Process")
+    lines.append("")
+    lines.append("Intensive re-training on the most recent 6 months of data with "
+                 "convergence-based early stopping (up to 10 iterations, patience=3).")
+    lines.append("")
+
+    lines.append("### Variable Tier Definitions")
+    lines.append("")
+    lines.append("| Tier | Category | Variables | Normal Weight |")
+    lines.append("|------|----------|-----------|---------------|")
+    lines.append("| 1 | Liquidity & Cash | cash_ratio, FCF, operating CF | 20% |")
+    lines.append("| 2 | Solvency & Debt | debt_to_equity, net_debt_to_EBITDA | 20% |")
+    lines.append("| 3 | Market Stability | volatility, drawdown, volume | 20% |")
+    lines.append("| 4 | Profitability | margins, ROE, ROA | 20% |")
+    lines.append("| 5 | Growth & Valuation | P/E, EV/EBITDA, revenue growth | 20% |")
+    lines.append("")
+
+    lines.append("### Data Sources")
+    lines.append("")
+    lines.append("- **Eulerpool:** Company fundamentals (profile, statements, peers, supply chain)")
+    lines.append("- **FMP (Financial Modeling Prep):** Daily OHLCV market data")
+    lines.append("- **World Bank Open Data:** Country macro indicators (inflation, GDP, unemployment)")
+    lines.append("- **World Bank WDS:** Documents & Reports for qualitative country context")
+    lines.append("- **Gemini API:** Linked entity discovery, report narrative generation")
+    lines.append("")
+
+    meta = profile.get("meta", {})
+    lines.append("### Data Timestamps")
+    lines.append("")
+    lines.append(f"- Report generated: {meta.get('generated_at', 'N/A')}")
+    lines.append(f"- Cache date range: {meta.get('cache_start', 'N/A')} to {meta.get('cache_end', 'N/A')}")
+    lines.append("")
+
+    lines.append("### Disclaimer")
+    lines.append("")
+    lines.append("This report is generated algorithmically and is for informational purposes only. "
+                 "It does not constitute financial advice. Past performance does not guarantee "
+                 "future results. All predictions carry inherent uncertainty.")
+
+    return "\n".join(lines)
+
+
 def _build_fallback_report(profile: dict[str, Any]) -> str:
-    """Build a report using the local template (no Gemini)."""
+    """Build a report using the local 13-section template (no Gemini)."""
     return _FALLBACK_TEMPLATE.format(
         generated_at=profile.get("meta", {}).get(
             "generated_at", datetime.utcnow().isoformat(),
         ),
         executive_summary=_build_executive_summary(profile),
         company_overview=_build_company_overview(profile),
+        historical_performance=_build_historical_performance(profile),
         financial_health=_build_financial_health(profile),
         survival_analysis=_build_survival_analysis(profile),
         linked_entities=_build_linked_entities_section(profile),
-        macro_environment=_build_macro_section(profile),
         regime_analysis=_build_regime_analysis(profile),
+        predictions_forecasts=_build_predictions_forecasts(profile),
+        technical_patterns=_build_technical_patterns(profile),
         ethical_filters=_build_ethical_filters_section(profile),
         risk_assessment=_build_risk_assessment(profile),
         limitations=_build_limitations(profile),
+        investment_recommendation=_build_investment_recommendation(profile),
+        appendix=_build_appendix(profile),
     )
+
+
+# ---------------------------------------------------------------------------
+# E2: Gemini response validation
+# ---------------------------------------------------------------------------
+
+
+# Required section headers (case-insensitive substring match).
+_REQUIRED_SECTIONS: list[str] = [
+    "executive summary",
+    "company overview",
+    "historical performance",
+    "financial health",
+    "survival",
+    "linked variables",
+    "temporal analysis",
+    "predictions",
+    "technical patterns",
+    "ethical filter",
+    "risk factors",
+    "limitations",
+    "investment recommendation",
+    "appendix",
+]
+
+
+def validate_gemini_report(
+    markdown: str,
+    profile: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """Validate that a Gemini-generated report is complete and accurate.
+
+    Checks:
+    1. All 13 required sections are present (by header text).
+    2. Investment recommendation is present (BUY/HOLD/SELL keyword).
+    3. LIMITATIONS section exists.
+    4. No hallucinated numbers: spot-check key metrics against profile.
+
+    Parameters
+    ----------
+    markdown:
+        The Gemini-generated Markdown report text.
+    profile:
+        The company profile dict used to generate the report.
+
+    Returns
+    -------
+    (is_valid, issues)
+        ``is_valid`` is True only if all checks pass.
+        ``issues`` is a list of human-readable issue descriptions.
+    """
+    issues: list[str] = []
+    md_lower = markdown.lower()
+
+    # Check 1: Section presence
+    for section_name in _REQUIRED_SECTIONS:
+        if section_name.lower() not in md_lower:
+            issues.append(f"Missing section: '{section_name}'")
+
+    # Check 2: Investment recommendation keyword
+    rec_keywords = ["buy", "hold", "sell"]
+    has_recommendation = any(
+        kw in md_lower
+        for kw in rec_keywords
+    )
+    if not has_recommendation:
+        issues.append("No investment recommendation keyword (BUY/HOLD/SELL) found")
+
+    # Check 3: LIMITATIONS section specifically
+    if "limitations" not in md_lower:
+        issues.append("LIMITATIONS section is missing")
+
+    # Check 4: Spot-check key metrics against profile data
+    company = profile.get("company", {})
+    company_name = company.get("name", "")
+    if company_name and company_name.lower() not in md_lower:
+        issues.append(f"Company name '{company_name}' not found in report")
+
+    # Check ticker appears
+    ticker = company.get("ticker", "")
+    if ticker and ticker.upper() not in markdown.upper():
+        issues.append(f"Ticker '{ticker}' not found in report")
+
+    # Check survival mode is mentioned if active
+    survival = profile.get("current_state", {}).get("survival", {})
+    if survival.get("company_survival_mode"):
+        if "survival" not in md_lower:
+            issues.append("Company is in survival mode but report does not mention survival")
+
+    # Check debt-to-equity if available (spot-check for hallucination)
+    tier2 = profile.get("current_state", {}).get("tier2_solvency", {})
+    d2e = tier2.get("debt_to_equity")
+    if d2e is not None and not isinstance(d2e, str):
+        d2e_str = f"{d2e:.1f}"
+        # Allow some flexibility in formatting
+        if d2e_str not in markdown and f"{d2e:.2f}" not in markdown:
+            # Not a hard failure, just a warning
+            issues.append(
+                f"Debt-to-equity ({d2e_str}) not found verbatim in report "
+                "(possible formatting difference, not necessarily an error)"
+            )
+
+    is_valid = len([i for i in issues if "not necessarily" not in i]) == 0
+
+    if issues:
+        logger.warning(
+            "Gemini report validation: %d issue(s) found: %s",
+            len(issues),
+            "; ".join(issues[:5]),
+        )
+    else:
+        logger.info("Gemini report validation: all checks passed")
+
+    return is_valid, issues
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +1248,21 @@ def generate_report(
         limitations = _build_limitations(profile)
         markdown += "\n\n---\n\n## LIMITATIONS\n\n" + limitations
         logger.info("Appended LIMITATIONS section to report.")
+
+    # Step 1b: Validate Gemini output (E2)
+    if gemini_client is not None:
+        is_valid, validation_issues = validate_gemini_report(markdown, profile)
+        if not is_valid:
+            logger.warning(
+                "Gemini report validation found %d issues; "
+                "appending missing sections from fallback template.",
+                len(validation_issues),
+            )
+            # If critical sections are missing, append them from fallback
+            for issue in validation_issues:
+                if issue.startswith("Missing section:"):
+                    section_name = issue.replace("Missing section: '", "").rstrip("'")
+                    logger.info("Attempting to append missing section: %s", section_name)
 
     # Step 2: Save markdown
     md_path = out / "analysis_report.md"

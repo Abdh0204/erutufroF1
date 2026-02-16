@@ -199,44 +199,177 @@ Return valid JSON only, no markdown.
             return {}
 
     # ------------------------------------------------------------------
-    # Report generation (Sec 18)
+    # Report generation (Sec 18) -- Full 13-section prompt (Phase E1)
     # ------------------------------------------------------------------
 
     _REPORT_PROMPT = """\
-You are a senior financial analyst at a Bloomberg-style research firm.
-Generate a comprehensive company analysis report in Markdown format
-based on the following company profile data.
+You are a Bloomberg-style financial analyst specializing in comprehensive equity research.
 
+You have been provided with a complete company profile that includes:
+- 2 years of historical financial and market data
+- Advanced temporal analysis using 20+ mathematical models (HMM, Kalman, \
+GARCH, VAR, LSTM, Transformer, Random Forest, XGBoost, etc.)
+- Survival mode analysis (company + country)
+- Ethical filter assessments (Purchasing Power, Solvency, Gharar, Cash is King)
+- Multi-horizon predictions with uncertainty quantification
+- Regime detection and structural break analysis
+- Linked variables (sector, industry, competitors, macro from World Bank)
+
+Your task is to generate a professional investment report that synthesizes \
+this information into actionable insights for sophisticated investors.
+
+---
+
+REPORT STRUCTURE (MUST INCLUDE ALL 13 SECTIONS):
+
+1. EXECUTIVE SUMMARY
+   - 3 bullet points summarizing key findings
+   - Clear investment recommendation: BUY / HOLD / SELL with confidence level (High/Medium/Low)
+   - 12-month target price with rationale
+
+2. COMPANY OVERVIEW
+   - Company identity and classification
+   - Current market position and capitalization
+   - Sector and industry context
+
+3. HISTORICAL PERFORMANCE ANALYSIS (2 Years)
+   - Total return vs real return (Purchasing Power filter applied)
+   - Risk-adjusted performance: Sharpe ratio, maximum drawdown
+   - Regime breakdown: time spent in bull/bear/high-volatility regimes
+   - Structural breaks and major market events detected
+   - Up days vs down days distribution
+
+4. CURRENT FINANCIAL HEALTH (Tier-by-Tier Breakdown)
+
+   **Explain the Tier Hierarchy:**
+   - Why the 5-tier system matters
+   - How weights change in different survival regimes
+   - Current hierarchy weights and what they mean
+
+   **Tier 1: Liquidity & Cash** -- Cash and equivalents, cash ratio, free cash flow; Cash is King filter results
+   **Tier 2: Solvency & Debt** -- Debt-to-equity, net debt to EBITDA, interest coverage; Solvency filter results
+   **Tier 3: Market Stability** -- Volatility, drawdown, volume; Gharar filter results
+   **Tier 4: Profitability** -- Margins (gross, operating, net), ROE, ROA
+   **Tier 5: Growth & Valuation** -- Revenue/earnings growth, P/E, EV/EBITDA
+
+5. SURVIVAL MODE ANALYSIS
+   - Current survival status (company, country, protection)
+   - Historical survival episodes (count and duration)
+   - Vanity expenditure analysis and interpretation
+   - What vanity spending reveals about management discipline
+
+6. LINKED VARIABLES & MARKET CONTEXT
+   - Sector performance: relative strength vs sector median
+   - Industry positioning: valuation premium/discount vs industry
+   - Competitor health assessment: how does the company compare?
+   - Supply chain risk analysis (if applicable)
+   - Macro environment from World Bank indicators (inflation, GDP, unemployment, FX)
+
+7. TEMPORAL ANALYSIS & MODEL INSIGHTS
+   - Current market regime and regime distribution over 2 years
+   - Regime transitions and what they signal
+   - Structural breaks detected
+   - Model performance summary by tier (accuracy percentages)
+   - Best performing module
+   - Confidence levels in predictions
+
+8. PREDICTIONS & FORECASTS
+   **Next Day:** NOTE: Due to Technical Alpha protection, only Low price \
+is shown for next-day OHLC. Include Tier 1-5 variable predictions with \
+uncertainty bands (5th, 50th, 95th percentiles). Survival probability for next day.
+   **Next Week:** Expected return and volatility, full OHLC candlestick series, predicted technical patterns.
+   **Next Month:** Price target range (5th, 50th, 95th percentiles), key events to watch, regime shift predictions.
+   **Next Year:** Annual outlook with uncertainty, predicted regime changes by quarter, long-term trajectory.
+   **Monte Carlo Uncertainty:** Tail risk scenarios (worst 5%), base case (50th percentile), upside scenarios (top 5%).
+
+9. TECHNICAL PATTERNS & CHART ANALYSIS
+   - Describe the 2-year price chart with regime shading
+   - Historical candlestick patterns detected (last 6 months)
+   - Predicted patterns for next week/month
+   - Support and resistance levels
+
+10. ETHICAL FILTER ASSESSMENT
+    **Purchasing Power Filter:** Verdict, nominal vs real return, inflation impact.
+    **Solvency Filter:** Verdict, debt-to-equity ratio, threshold.
+    **Gharar Filter (Uncertainty/Speculation):** Verdict, volatility, stability score.
+    **Cash is King Filter:** Verdict, FCF yield.
+    **Overall Ethical Score:** Combine all filters; is this investment suitable for ethical/Islamic investors?
+    Universal lessons: Why these filters matter for ALL investors.
+
+11. RISK FACTORS & LIMITATIONS
+    - Model assumptions and their limitations
+    - Key risks: company-specific, industry/sector, macro/country
+    - Scenarios that could invalidate predictions
+    - Black swan events not captured by models
+    11.1 LIMITATIONS (SHORT, REQUIRED):
+    Provide 5-10 bullets covering: data window, OHLCV source (FMP) caveats, \
+macro frequency reality (World Bank often annual, aligned daily via as-of logic), \
+missingness summary, any modules that failed and how the report compensated. \
+Must be easy for a non-technical client to understand.
+
+12. INVESTMENT RECOMMENDATION
+    **Recommendation:** [BUY / HOLD / SELL]
+    **Confidence Level:** [High / Medium / Low]
+    **12-Month Target Price:** with rationale
+    **Key Catalysts to Watch:** events or metrics that would change the recommendation
+    **Entry Strategy:** recommended entry price or conditions
+    **Exit Strategy:** price targets for profits and stop-loss levels
+    **Position Sizing:** suggested portfolio allocation based on risk profile
+
+13. APPENDIX
+    - Methodology summary: temporal modules used (HMM, Kalman, VAR, LSTM, etc.)
+    - Burn-out process explanation
+    - Ensemble weighting approach
+    - Variable tier definitions (Tier 1-5 explained)
+    - Glossary of technical terms
+    - Data sources: Eulerpool (financials), FMP (OHLCV), World Bank (macro), Gemini (relationships)
+    - Data timestamps and coverage
+    - Disclaimer and limitations
+
+---
+
+FORMATTING REQUIREMENTS:
+- Use markdown formatting with clear section headers (##, ###)
+- Use tables for financial data where appropriate
+- Use bullet points and numbered lists for clarity
+- Bold key metrics and verdicts
+- Italicize interpretive commentary
+- Include placeholders for charts: [CHART: Description]
+- Keep language professional but accessible
+- Explain technical concepts when first introduced
+- Total length: aim for 8,000-12,000 words (comprehensive but readable)
+
+---
+
+COMPLETE COMPANY PROFILE DATA:
 {profile_json}
 
-The report MUST include:
-1. Executive Summary
-2. Company Overview
-3. Financial Health Assessment (liquidity, solvency, profitability)
-4. Survival Analysis (if applicable)
-5. Linked Entities & Relative Positioning
-6. Macro Environment Impact
-7. Regime Analysis & Forecasts (if available)
-8. Risk Assessment
-9. **LIMITATIONS** -- a short, plain-language section covering:
-   - Data window and frequency limitations
-   - OHLCV source caveats
-   - Macro data frequency and alignment
-   - Data missingness summary
-   - Any failed modules and mitigations applied
+---
 
-Write for a professional but non-technical audience. Be factual and
-cite specific numbers from the data. Use Markdown formatting with
-headers, bullet points, and bold text for emphasis.
+Generate the complete Bloomberg-style investment report now.
 """
 
-    def generate_report(self, company_profile_json: str) -> str:
+    def generate_report(
+        self,
+        company_profile_json: str,
+        *,
+        max_output_tokens: int = 16000,
+        temperature: float = 0.3,
+        timeout: int = 120,
+    ) -> str:
         """Generate a Bloomberg-style analysis report from profile data.
 
         Parameters
         ----------
         company_profile_json:
             JSON string of the full company profile.
+        max_output_tokens:
+            Maximum tokens for the Gemini response (default 16000 for
+            comprehensive reports).
+        temperature:
+            Sampling temperature (lower = more factual).
+        timeout:
+            Request timeout in seconds (report generation is slow).
 
         Returns
         -------
@@ -246,7 +379,30 @@ headers, bullet points, and bold text for emphasis.
             prompt = self._REPORT_PROMPT.format(
                 profile_json=company_profile_json,
             )
-            return self._generate(prompt)
+            url = (
+                f"{self._base_url}/models/{self._model}:generateContent"
+                f"?key={self._api_key}"
+            )
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": temperature,
+                    "maxOutputTokens": max_output_tokens,
+                },
+            }
+            resp = requests.post(url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if not parts:
+                return ""
+            return parts[0].get("text", "")
+
         except Exception as exc:
             logger.error("Gemini report generation failed: %s", exc)
             return (

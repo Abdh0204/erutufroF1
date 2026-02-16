@@ -28,6 +28,9 @@ FMP_BASE_URL: str = "https://financialmodelingprep.com/api/v3"
 # ---------------------------------------------------------------------------
 WORLD_BANK_BASE_URL: str = "https://api.worldbank.org/v2"
 
+# World Bank Documents & Reports Search API (WDS)
+WB_WDS_BASE_URL: str = "https://search.worldbank.org/api/v3/wds"
+
 # ---------------------------------------------------------------------------
 # Gemini base URL
 # ---------------------------------------------------------------------------

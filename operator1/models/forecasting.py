@@ -32,10 +32,12 @@ Spec refs: Sec 17
 
 from __future__ import annotations
 
+import copy
 import logging
 import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -1605,3 +1607,940 @@ def run_forecasting(
     )
 
     return cache, result
+
+
+# ===========================================================================
+# Phase D -- Temporal Engine Enhancements
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# D3: ModelWrapper protocol and concrete wrappers
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ModelWrapperProtocol(Protocol):
+    """Protocol every online-updatable model must satisfy."""
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray: ...
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None: ...
+
+
+class BaseModelWrapper(ABC):
+    """Abstract base for all model wrappers used in the forward pass."""
+
+    name: str = "base"
+    failed_update: bool = False
+    _update_error: str | None = None
+
+    @abstractmethod
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        """Return point forecast for the next step."""
+
+    @abstractmethod
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        """Incremental parameter update after observing *actual_t_plus_1*."""
+
+
+class KalmanWrapper(BaseModelWrapper):
+    """Online Kalman wrapper using a local-level state-space model.
+
+    Kalman is inherently online: the Kalman gain update is a single
+    matrix operation per observation.
+    """
+
+    name = "kalman"
+
+    def __init__(self, series: np.ndarray) -> None:
+        clean = series[~np.isnan(series)]
+        self._last_value = float(clean[-1]) if len(clean) else 0.0
+        self._state = float(clean[-1]) if len(clean) else 0.0
+        self._P = 1.0  # state covariance
+        self._Q = 0.01  # process noise
+        self._R = 0.1  # measurement noise
+        self._fitted = len(clean) >= _MIN_OBS_KALMAN
+
+        # Try fitting a proper statsmodels model for the initial state.
+        if self._fitted:
+            try:
+                from statsmodels.tsa.statespace.structural import (
+                    UnobservedComponents,
+                )
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model = UnobservedComponents(clean, level="local level")
+                    res = model.fit(disp=False, maxiter=200)
+                self._state = float(res.filtered_state[0, -1])
+                self._P = float(res.filtered_state_cov[0, 0, -1])
+            except Exception:
+                pass  # fall back to simple values
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        # Local-level model: prediction = current state estimate
+        predicted = self._state
+        self._P += self._Q  # predicted covariance
+        return np.array([predicted])
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            z = float(actual_t_plus_1[0]) if len(actual_t_plus_1) else self._state
+            if np.isnan(z):
+                return  # skip update on missing observation
+            # Kalman gain
+            S = self._P + self._R
+            K = self._P / S if S > 1e-12 else 0.5
+            # State update
+            innovation = z - self._state
+            self._state += K * innovation
+            self._P = (1 - K) * self._P
+            self._last_value = z
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+class GARCHWrapper(BaseModelWrapper):
+    """Online GARCH wrapper with recursive variance update.
+
+    Update rule: sigma2[t+1] = omega + alpha * eps^2[t] + beta * sigma2[t]
+    """
+
+    name = "garch"
+
+    def __init__(self, returns: np.ndarray) -> None:
+        clean = returns[~np.isnan(returns)]
+        # Default GARCH(1,1) parameters
+        self._omega = 0.0001
+        self._alpha = 0.10
+        self._beta = 0.85
+        self._sigma2 = float(np.var(clean)) if len(clean) > 1 else 0.0004
+        self._last_return = float(clean[-1]) if len(clean) else 0.0
+        self._fitted = len(clean) >= _MIN_OBS_GARCH
+
+        if self._fitted:
+            try:
+                from arch import arch_model  # type: ignore[import-untyped]
+
+                scaled = clean * 100.0
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model = arch_model(scaled, vol="Garch", p=1, q=1, mean="Constant", rescale=False)
+                    res = model.fit(disp="off", show_warning=False)
+                self._omega = float(res.params.get("omega", self._omega))
+                self._alpha = float(res.params.get("alpha[1]", self._alpha))
+                self._beta = float(res.params.get("beta[1]", self._beta))
+                self._sigma2 = float(res.conditional_volatility.iloc[-1] ** 2) / 10000.0
+            except Exception:
+                pass
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        # Forecast next-step conditional volatility (as std dev)
+        return np.array([np.sqrt(max(self._sigma2, 1e-12))])
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            r = float(actual_t_plus_1[0]) if len(actual_t_plus_1) else 0.0
+            if np.isnan(r):
+                return
+            eps2 = r ** 2
+            self._sigma2 = self._omega + self._alpha * eps2 + self._beta * self._sigma2
+            self._last_return = r
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+class VARWrapper(BaseModelWrapper):
+    """Rolling-window VAR with periodic refit.
+
+    Cannot be updated truly online; instead, accumulates new rows and
+    refits every ``refit_interval`` steps.
+    """
+
+    name = "var"
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        target_col: str,
+        *,
+        max_lag: int = _VAR_MAX_LAG,
+        refit_interval: int = 50,
+    ) -> None:
+        self._target_col = target_col
+        self._max_lag = max_lag
+        self._refit_interval = refit_interval
+        self._steps_since_refit = 0
+        self._buffer = data.dropna().copy()
+        self._fitted = False
+        self._result: Any = None
+        self._cols = list(data.columns)
+        self._last_pred = np.zeros(len(self._cols))
+        self._refit()
+
+    def _refit(self) -> None:
+        try:
+            from statsmodels.tsa.api import VAR as VARModel  # type: ignore[import-untyped]
+
+            if len(self._buffer) < _MIN_OBS_VAR:
+                return
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = VARModel(self._buffer.values)
+                self._result = model.fit(maxlags=self._max_lag, ic="aic")
+            self._fitted = True
+            self._steps_since_refit = 0
+        except Exception:
+            self._fitted = False
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        if not self._fitted or self._result is None:
+            return np.array([self._buffer[self._target_col].iloc[-1]]) if self._target_col in self._buffer.columns else np.zeros(1)
+        try:
+            lag_data = self._buffer.values[-self._result.k_ar:]
+            fcast = self._result.forecast(lag_data, steps=1)
+            self._last_pred = fcast[0]
+            idx = self._cols.index(self._target_col) if self._target_col in self._cols else 0
+            return np.array([fcast[0, idx]])
+        except Exception:
+            return np.array([self._buffer[self._target_col].iloc[-1]]) if self._target_col in self._buffer.columns else np.zeros(1)
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            # Append new observation row
+            new_row = pd.DataFrame([actual_t_plus_1[:len(self._cols)]], columns=self._cols)
+            self._buffer = pd.concat([self._buffer, new_row], ignore_index=True)
+            # Keep buffer bounded
+            if len(self._buffer) > 600:
+                self._buffer = self._buffer.iloc[-500:]
+            self._steps_since_refit += 1
+            if self._steps_since_refit >= self._refit_interval:
+                self._refit()
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+class LSTMWrapper(BaseModelWrapper):
+    """LSTM wrapper with single-step gradient updates.
+
+    Performs a single-epoch, single-sample gradient descent step on
+    each new observation for online learning.
+    """
+
+    name = "lstm"
+
+    def __init__(
+        self,
+        series: np.ndarray,
+        *,
+        hidden_size: int = _LSTM_HIDDEN,
+        lookback: int = _LSTM_LOOKBACK,
+        lr: float = _LSTM_LR,
+    ) -> None:
+        self._lookback = lookback
+        self._lr = lr
+        self._hidden_size = hidden_size
+        self._fitted = False
+        self._model: Any = None
+        self._optimizer: Any = None
+        self._scaler_mean = 0.0
+        self._scaler_std = 1.0
+        self._history: list[float] = []
+        self._last_pred = 0.0
+
+        clean = series[~np.isnan(series)]
+        if len(clean) < _MIN_OBS_LSTM:
+            return
+
+        self._history = list(clean)
+        self._scaler_mean = float(np.mean(clean))
+        self._scaler_std = float(np.std(clean)) or 1.0
+
+        try:
+            import torch
+            import torch.nn as nn
+
+            class _MiniLSTM(nn.Module):
+                def __init__(self, hidden: int) -> None:
+                    super().__init__()
+                    self.lstm = nn.LSTM(1, hidden, batch_first=True)
+                    self.fc = nn.Linear(hidden, 1)
+
+                def forward(self, x: Any) -> Any:
+                    out, _ = self.lstm(x)
+                    return self.fc(out[:, -1, :])
+
+            self._model = _MiniLSTM(hidden_size)
+            self._optimizer = torch.optim.Adam(self._model.parameters(), lr=lr)
+            self._criterion = nn.MSELoss()
+
+            # Initial training
+            scaled = (clean - self._scaler_mean) / self._scaler_std
+            X, y = [], []
+            for i in range(len(scaled) - lookback):
+                X.append(scaled[i:i + lookback])
+                y.append(scaled[i + lookback])
+            if len(X) < 10:
+                return
+
+            X_t = torch.FloatTensor(np.array(X)).unsqueeze(-1)
+            y_t = torch.FloatTensor(np.array(y)).unsqueeze(-1)
+
+            self._model.train()
+            for _ in range(min(_LSTM_EPOCHS, 30)):
+                self._optimizer.zero_grad()
+                pred = self._model(X_t)
+                loss = self._criterion(pred, y_t)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
+                self._optimizer.step()
+
+            self._fitted = True
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        if not self._fitted or self._model is None:
+            return np.array([self._history[-1]]) if self._history else np.zeros(1)
+        try:
+            import torch
+
+            recent = self._history[-self._lookback:]
+            if len(recent) < self._lookback:
+                return np.array([self._history[-1]])
+
+            scaled = [(v - self._scaler_mean) / self._scaler_std for v in recent]
+            x = torch.FloatTensor([scaled]).unsqueeze(-1)
+            self._model.eval()
+            with torch.no_grad():
+                pred_scaled = float(self._model(x).item())
+            pred = pred_scaled * self._scaler_std + self._scaler_mean
+            self._last_pred = pred
+            return np.array([pred])
+        except Exception:
+            return np.array([self._history[-1]]) if self._history else np.zeros(1)
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            val = float(actual_t_plus_1[0])
+            if np.isnan(val):
+                return
+            self._history.append(val)
+
+            if not self._fitted or self._model is None:
+                return
+
+            import torch
+
+            # Single-step gradient update
+            if len(self._history) < self._lookback + 1:
+                return
+
+            recent = self._history[-(self._lookback + 1):]
+            x_raw = recent[:-1]
+            y_raw = recent[-1]
+
+            scaled_x = [(v - self._scaler_mean) / self._scaler_std for v in x_raw]
+            scaled_y = (y_raw - self._scaler_mean) / self._scaler_std
+
+            x = torch.FloatTensor([scaled_x]).unsqueeze(-1)
+            y = torch.FloatTensor([[scaled_y]])
+
+            self._model.train()
+            self._optimizer.zero_grad()
+            pred = self._model(x)
+            loss = self._criterion(pred, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
+            self._optimizer.step()
+
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+class TreeWrapper(BaseModelWrapper):
+    """Tree ensemble wrapper with periodic refit.
+
+    Tree models cannot be updated online, so we accumulate data and
+    refit every *refit_interval* steps.
+    """
+
+    name = "tree"
+
+    def __init__(
+        self,
+        features: pd.DataFrame,
+        target_col: str,
+        *,
+        random_state: int = 42,
+        refit_interval: int = 50,
+    ) -> None:
+        self._target_col = target_col
+        self._random_state = random_state
+        self._refit_interval = refit_interval
+        self._steps_since_refit = 0
+        self._fitted = False
+        self._model_obj: Any = None
+        self._feature_cols: list[str] = [c for c in features.columns if c != target_col]
+        self._buffer = features.dropna().copy()
+        self._last_pred = 0.0
+        self._refit()
+
+    def _refit(self) -> None:
+        if len(self._buffer) < _MIN_OBS_TREE or not self._feature_cols:
+            return
+        try:
+            self._model_obj = _try_load_tree_model(self._random_state, ModelMetrics())
+            if self._model_obj is None:
+                return
+            X = self._buffer[self._feature_cols].values
+            y = self._buffer[self._target_col].values
+            self._model_obj.fit(X, y)
+            self._fitted = True
+            self._steps_since_refit = 0
+        except Exception:
+            self._fitted = False
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        if not self._fitted or self._model_obj is None:
+            return np.array([self._last_pred])
+        try:
+            # Use last known features
+            last_row = self._buffer[self._feature_cols].iloc[-1:].values
+            pred = float(self._model_obj.predict(last_row)[0])
+            self._last_pred = pred
+            return np.array([pred])
+        except Exception:
+            return np.array([self._last_pred])
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            new_row = pd.DataFrame(
+                [actual_t_plus_1[:len(self._feature_cols) + 1]],
+                columns=self._feature_cols + [self._target_col],
+            )
+            self._buffer = pd.concat([self._buffer, new_row], ignore_index=True)
+            if len(self._buffer) > 600:
+                self._buffer = self._buffer.iloc[-500:]
+            self._steps_since_refit += 1
+            if self._steps_since_refit >= self._refit_interval:
+                self._refit()
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+class BaselineWrapper(BaseModelWrapper):
+    """Baseline wrapper using exponential moving average.
+
+    Update rule: ema = alpha * actual + (1 - alpha) * ema
+    """
+
+    name = "baseline"
+
+    def __init__(self, series: np.ndarray, ema_span: int = 21) -> None:
+        clean = series[~np.isnan(series)]
+        self._alpha = 2.0 / (ema_span + 1)
+        self._ema = float(clean[-1]) if len(clean) else 0.0
+        self._fitted = len(clean) >= 1
+
+        if len(clean) >= 3:
+            ema = clean[0]
+            for val in clean[1:]:
+                ema = self._alpha * val + (1 - self._alpha) * ema
+            self._ema = float(ema)
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        return np.array([self._ema])
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            val = float(actual_t_plus_1[0])
+            if np.isnan(val):
+                return
+            self._ema = self._alpha * val + (1 - self._alpha) * self._ema
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# D2: Regime-weighted historical training windows
+# ---------------------------------------------------------------------------
+
+
+def compute_regime_sample_weights(
+    regime_labels: pd.Series,
+    current_day_idx: int,
+    *,
+    half_life_days: int = 126,
+    regime_similarity_boost: float = 2.0,
+) -> np.ndarray:
+    """Compute per-day training weights for regime-aware learning.
+
+    ``w(tau) proportional to exp(-delta_t / half_life) * similarity(regime(tau), regime(t))``
+
+    Parameters
+    ----------
+    regime_labels:
+        Series of regime labels (str) indexed by day position.
+    current_day_idx:
+        Index of the current day *t* in the forward pass.
+    half_life_days:
+        Exponential decay half-life in trading days.
+    regime_similarity_boost:
+        Multiplier for days sharing the same regime as day *t*.
+
+    Returns
+    -------
+    1-D array of non-negative weights for days ``[0, current_day_idx]``.
+    Weights are normalised to sum to 1.
+    """
+    n = current_day_idx + 1
+    if n <= 0:
+        return np.array([1.0])
+
+    current_regime = regime_labels.iloc[current_day_idx] if current_day_idx < len(regime_labels) else None
+
+    # Temporal decay
+    deltas = np.arange(n, dtype=np.float64)[::-1]  # [current_day_idx, ..., 0]
+    # Reverse so deltas[i] = current_day_idx - i (time since day i)
+    deltas = np.arange(current_day_idx, -1, -1, dtype=np.float64)
+    decay = np.exp(-deltas / max(half_life_days, 1))
+
+    # Regime similarity
+    similarity = np.ones(n, dtype=np.float64)
+    if current_regime is not None:
+        for i in range(n):
+            if i < len(regime_labels) and regime_labels.iloc[i] == current_regime:
+                similarity[i] = regime_similarity_boost
+
+    weights = decay * similarity
+    total = weights.sum()
+    if total > 0:
+        weights /= total
+    else:
+        weights = np.ones(n) / n
+
+    return weights
+
+
+# ---------------------------------------------------------------------------
+# D1: Day-by-day forward pass with predict-compare-update loop
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ForwardPassResult:
+    """Container for forward-pass outputs."""
+
+    errors_by_tier: dict[int, list[float]] = field(default_factory=lambda: {i: [] for i in range(1, 6)})
+    errors_by_regime: dict[str, list[float]] = field(default_factory=dict)
+    model_states: dict[str, BaseModelWrapper] = field(default_factory=dict)
+    predictions_log: list[dict[str, Any]] = field(default_factory=list)
+    total_days: int = 0
+    warmup_days: int = 0
+
+
+def _init_model_wrappers(
+    cache: pd.DataFrame,
+    variable: str,
+    tier: str,
+    tier_map: dict[str, list[str]],
+    available_vars: list[str],
+    random_state: int = 42,
+) -> list[BaseModelWrapper]:
+    """Initialise model wrappers for a single variable.
+
+    Returns a list of successfully initialised wrappers (may be empty
+    except for baseline which always succeeds).
+    """
+    series = cache[variable].values
+    wrappers: list[BaseModelWrapper] = []
+
+    # Kalman (preferred for tier1/tier2)
+    if tier in ("tier1", "tier2"):
+        w = KalmanWrapper(series)
+        if w._fitted:
+            wrappers.append(w)
+
+    # GARCH (for volatility-related variables)
+    if "volatility" in variable or "return" in variable:
+        w = GARCHWrapper(series)
+        if w._fitted:
+            wrappers.append(w)
+
+    # LSTM
+    w = LSTMWrapper(series, hidden_size=_LSTM_HIDDEN, lookback=_LSTM_LOOKBACK)
+    if w._fitted:
+        wrappers.append(w)
+
+    # Baseline (always succeeds)
+    wrappers.append(BaselineWrapper(series))
+
+    return wrappers
+
+
+def run_forward_pass(
+    cache: pd.DataFrame,
+    tier_variables: dict[str, list[str]] | None = None,
+    hierarchy_weights: dict[str, float] | None = None,
+    regime_labels: pd.Series | None = None,
+    *,
+    warmup_days: int = 60,
+    log_interval: int = 50,
+    random_state: int = 42,
+) -> ForwardPassResult:
+    """Day-by-day temporal analysis: predict -> compare -> update.
+
+    Parameters
+    ----------
+    cache:
+        Full 2-year daily cache (DatetimeIndex, ~500 rows).
+    tier_variables:
+        Mapping of tier name -> list of variable names.  If None,
+        loaded from survival hierarchy config.
+    hierarchy_weights:
+        Current tier weights from survival mode analysis.  Defaults
+        to equal weights.
+    regime_labels:
+        Per-day regime labels from HMM/GMM.  If None, all days are
+        treated as the same regime.
+    warmup_days:
+        Number of initial days used for cold-start fitting.
+    log_interval:
+        Print progress every N days.
+    random_state:
+        Random seed for reproducible models.
+
+    Returns
+    -------
+    ForwardPassResult containing per-tier daily errors, model states,
+    and a day-by-day predictions log.
+    """
+    logger.info("Starting forward pass (warmup=%d days)...", warmup_days)
+
+    result = ForwardPassResult(warmup_days=warmup_days)
+
+    if tier_variables is None:
+        tier_variables = _load_tier_variables()
+    if hierarchy_weights is None:
+        hierarchy_weights = {f"tier{i}": 20.0 for i in range(1, 6)}
+    if regime_labels is None:
+        regime_labels = pd.Series(["normal"] * len(cache), index=cache.index)
+
+    # Flatten all tier variables that exist in cache
+    all_vars: list[str] = []
+    var_to_tier: dict[str, int] = {}
+    for tier_key, var_list in tier_variables.items():
+        tier_num = int(tier_key.replace("tier", "")) if "tier" in tier_key else 0
+        for v in var_list:
+            if v in cache.columns and v not in var_to_tier:
+                all_vars.append(v)
+                var_to_tier[v] = tier_num
+
+    if not all_vars:
+        logger.warning("No tier variables found in cache for forward pass")
+        return result
+
+    # Initialise model wrappers for each variable (cold-start on warmup window)
+    warmup_cache = cache.iloc[:warmup_days] if warmup_days < len(cache) else cache
+    model_bank: dict[str, list[BaseModelWrapper]] = {}
+    for var_name in all_vars:
+        tier_key = f"tier{var_to_tier[var_name]}"
+        tier_map = tier_variables
+        wrappers = _init_model_wrappers(
+            warmup_cache, var_name, tier_key, tier_map,
+            all_vars, random_state,
+        )
+        model_bank[var_name] = wrappers
+
+    n_days = len(cache)
+    result.total_days = n_days - warmup_days - 1
+
+    # Forward loop: day warmup_days to n_days - 2 (predict t+1, compare with actual t+1)
+    for t in range(warmup_days, n_days - 1):
+        regime_t = str(regime_labels.iloc[t]) if t < len(regime_labels) else "unknown"
+
+        for var_name in all_vars:
+            tier_num = var_to_tier[var_name]
+            tier_weight = hierarchy_weights.get(f"tier{tier_num}", 20.0)
+
+            state_t = np.array([cache[var_name].iloc[t]])
+            actual_t1 = np.array([cache[var_name].iloc[t + 1]])
+
+            if np.isnan(actual_t1[0]):
+                continue  # skip variables with missing next-day data
+
+            # Step B: Multi-module prediction (pick best / average)
+            predictions: list[float] = []
+            for wrapper in model_bank.get(var_name, []):
+                try:
+                    pred = wrapper.predict(state_t)
+                    if len(pred) > 0 and not np.isnan(pred[0]):
+                        predictions.append(float(pred[0]))
+                except Exception:
+                    pass
+
+            if not predictions:
+                continue
+
+            # Step C: Simple ensemble (average of available predictions)
+            ensemble_pred = float(np.mean(predictions))
+
+            # Step D: Reality check
+            error = float(actual_t1[0]) - ensemble_pred
+            weighted_error = (error ** 2) * (tier_weight / 20.0)
+
+            result.errors_by_tier[tier_num].append(weighted_error)
+            if regime_t not in result.errors_by_regime:
+                result.errors_by_regime[regime_t] = []
+            result.errors_by_regime[regime_t].append(weighted_error)
+
+            # Log prediction
+            result.predictions_log.append({
+                "day": t,
+                "variable": var_name,
+                "predicted": ensemble_pred,
+                "actual": float(actual_t1[0]),
+                "error": error,
+                "tier": tier_num,
+                "regime": regime_t,
+            })
+
+            # Step E: Online update
+            for wrapper in model_bank.get(var_name, []):
+                try:
+                    wrapper.update(state_t, actual_t1, hierarchy_weights)
+                except Exception:
+                    wrapper.failed_update = True
+
+        if (t - warmup_days) % log_interval == 0:
+            logger.info(
+                "Forward pass: day %d/%d", t - warmup_days, n_days - warmup_days - 1,
+            )
+
+    # Store final model states
+    result.model_states = {
+        var_name: wrappers[0] if wrappers else BaselineWrapper(np.array([0.0]))
+        for var_name, wrappers in model_bank.items()
+    }
+
+    # Summary
+    total_errors = sum(len(v) for v in result.errors_by_tier.values())
+    avg_errors = {
+        k: float(np.mean(v)) if v else 0.0
+        for k, v in result.errors_by_tier.items()
+    }
+    logger.info(
+        "Forward pass complete: %d prediction steps, avg tier errors: %s",
+        total_errors, avg_errors,
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# D4: Convergence-based burn-out (replaces window-shrinking heuristic)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BurnoutResult:
+    """Container for convergence-based burn-out outputs."""
+
+    model_states: dict[str, BaseModelWrapper] = field(default_factory=dict)
+    iterations_completed: int = 0
+    converged: bool = False
+    best_rmse_by_tier: dict[int, float] = field(default_factory=dict)
+    rmse_history: list[float] = field(default_factory=list)
+    learning_rate_multiplier: float = 1.0
+
+
+def run_burnout(
+    cache: pd.DataFrame,
+    tier_variables: dict[str, list[str]] | None = None,
+    hierarchy_weights: dict[str, float] | None = None,
+    regime_labels: pd.Series | None = None,
+    *,
+    burnout_window: int = 130,
+    max_iterations: int = 10,
+    patience: int = 3,
+    validation_days: int = 20,
+    learning_rate_multiplier: float = 2.0,
+    random_state: int = 42,
+) -> BurnoutResult:
+    """Intensive re-training on recent data with convergence detection.
+
+    Each iteration:
+    1. Reset to *burnout_window* days ago.
+    2. Run forward pass with higher learning rates.
+    3. Measure accuracy on last *validation_days*.
+    4. If accuracy improves, save as new best pattern.
+    5. Stop early if no improvement for *patience* iterations.
+
+    Parameters
+    ----------
+    cache:
+        Full 2-year daily cache.
+    tier_variables:
+        Tier -> variable list mapping.
+    hierarchy_weights:
+        Current hierarchy weights.
+    regime_labels:
+        Per-day regime labels.
+    burnout_window:
+        Number of recent trading days to use (default ~6 months).
+    max_iterations:
+        Maximum burn-out iterations.
+    patience:
+        Stop if no improvement for this many iterations.
+    validation_days:
+        Number of final days used for accuracy measurement.
+    learning_rate_multiplier:
+        Factor to increase learning rates during burn-out.
+    random_state:
+        Random seed.
+
+    Returns
+    -------
+    BurnoutResult with final model states, convergence info, and RMSE history.
+    """
+    logger.info(
+        "Starting burn-out (window=%d, max_iter=%d, patience=%d)...",
+        burnout_window, max_iterations, patience,
+    )
+
+    result = BurnoutResult(learning_rate_multiplier=learning_rate_multiplier)
+
+    # Extract the burnout slice
+    actual_window = min(burnout_window, len(cache))
+    burnout_cache = cache.iloc[-actual_window:].copy()
+
+    if len(burnout_cache) < validation_days + 30:
+        logger.warning("Insufficient data for burn-out (%d rows)", len(burnout_cache))
+        return result
+
+    best_rmse = float("inf")
+    best_states: dict[str, BaseModelWrapper] = {}
+    no_improve_count = 0
+
+    for iteration in range(max_iterations):
+        logger.info("Burn-out iteration %d/%d", iteration + 1, max_iterations)
+
+        # Run forward pass on the burnout window
+        # Use a smaller warmup within the burn-out window
+        burnout_warmup = max(20, actual_window - validation_days - 50)
+        fp_result = run_forward_pass(
+            burnout_cache,
+            tier_variables=tier_variables,
+            hierarchy_weights=hierarchy_weights,
+            regime_labels=regime_labels.iloc[-actual_window:] if regime_labels is not None and len(regime_labels) >= actual_window else None,
+            warmup_days=min(burnout_warmup, actual_window - validation_days - 1),
+            log_interval=999,  # suppress inner logging
+            random_state=random_state + iteration,
+        )
+
+        # Evaluate on last validation_days entries
+        if fp_result.predictions_log:
+            log_df = pd.DataFrame(fp_result.predictions_log)
+            # Filter to last validation_days worth of unique days
+            unique_days = sorted(log_df["day"].unique())
+            val_days_set = set(unique_days[-validation_days:]) if len(unique_days) >= validation_days else set(unique_days)
+            val_entries = log_df[log_df["day"].isin(val_days_set)]
+
+            if len(val_entries) > 0:
+                iter_rmse = float(np.sqrt(np.mean(val_entries["error"].values ** 2)))
+            else:
+                iter_rmse = float("inf")
+        else:
+            iter_rmse = float("inf")
+
+        result.rmse_history.append(iter_rmse)
+
+        if iter_rmse < best_rmse:
+            best_rmse = iter_rmse
+            best_states = copy.copy(fp_result.model_states)
+            no_improve_count = 0
+            logger.info("  -> New best RMSE: %.6f", iter_rmse)
+
+            # Compute per-tier RMSE
+            if fp_result.predictions_log:
+                log_df = pd.DataFrame(fp_result.predictions_log)
+                for tier_num in range(1, 6):
+                    tier_entries = log_df[log_df["tier"] == tier_num]
+                    if len(tier_entries) > 0:
+                        result.best_rmse_by_tier[tier_num] = float(
+                            np.sqrt(np.mean(tier_entries["error"].values ** 2))
+                        )
+        else:
+            no_improve_count += 1
+            logger.info("  -> RMSE: %.6f (no improvement, patience %d/%d)", iter_rmse, no_improve_count, patience)
+
+        if no_improve_count >= patience:
+            result.converged = True
+            logger.info("Burn-out converged after %d iterations (patience exhausted)", iteration + 1)
+            break
+
+    result.iterations_completed = len(result.rmse_history)
+    result.model_states = best_states
+
+    logger.info(
+        "Burn-out complete: %d iterations, converged=%s, best_rmse=%.6f",
+        result.iterations_completed, result.converged, best_rmse,
+    )
+
+    return result
