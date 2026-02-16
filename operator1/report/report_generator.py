@@ -90,13 +90,19 @@ _FALLBACK_TEMPLATE = """\
 
 ---
 
-## 8. Risk Assessment
+## 8. Ethical Filter Assessment
+
+{ethical_filters}
+
+---
+
+## 9. Risk Assessment
 
 {risk_assessment}
 
 ---
 
-## 9. LIMITATIONS
+## 10. LIMITATIONS
 
 {limitations}
 """
@@ -350,6 +356,85 @@ def _build_regime_analysis(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_ethical_filters_section(profile: dict[str, Any]) -> str:
+    """Build Section 8: Ethical Filter Assessment."""
+    filters = profile.get("filters", {})
+    lines: list[str] = []
+
+    if not filters.get("available", False):
+        lines.append("*Ethical filter data not available for this run.*")
+        return "\n".join(lines)
+
+    # Purchasing Power
+    pp = filters.get("purchasing_power", {})
+    lines.append("### Purchasing Power Filter")
+    lines.append("")
+    lines.append(f"**Verdict:** {pp.get('verdict', 'N/A')}")
+    lines.append("")
+    lines.append(f"- Nominal return: {_pct(pp.get('nominal_return'))}")
+    lines.append(f"- Real return (inflation-adjusted): {_pct(pp.get('real_return'))}")
+    lines.append(f"- Inflation impact: {_pct(pp.get('inflation_impact'))}")
+    lines.append("")
+    lines.append(
+        "*This filter reveals whether investors actually gained purchasing "
+        "power or merely saw a number go up while real wealth declined.*"
+    )
+    lines.append("")
+
+    # Solvency
+    sol = filters.get("solvency", {})
+    lines.append("### Solvency Filter (Debt-to-Equity)")
+    lines.append("")
+    lines.append(f"**Verdict:** {sol.get('verdict', 'N/A')}")
+    lines.append("")
+    lines.append(f"- Debt-to-equity: {_fmt(sol.get('debt_to_equity'))}")
+    lines.append(f"- Threshold: {_fmt(sol.get('threshold'))}")
+    lines.append(f"- {sol.get('interpretation', '')}")
+    lines.append("")
+    lines.append(
+        "*Beyond religious compliance, high leverage makes companies "
+        "fragile in recessions and rate hikes. This filter protects "
+        "against leveraged blow-ups.*"
+    )
+    lines.append("")
+
+    # Gharar
+    gh = filters.get("gharar", {})
+    lines.append("### Gharar Filter (Volatility / Speculation)")
+    lines.append("")
+    lines.append(f"**Verdict:** {gh.get('verdict', 'N/A')}")
+    lines.append("")
+    lines.append(f"- Volatility (21d): {_pct(gh.get('volatility_21d'))}")
+    lines.append(f"- Stability score: {_fmt(gh.get('stability_score'))}/10")
+    lines.append(f"- {gh.get('interpretation', '')}")
+    lines.append("")
+    lines.append(
+        "*This filter separates calculated investment from gambling "
+        "regardless of one's background -- if volatility is extreme, any "
+        "prediction is as likely to be wrong as right.*"
+    )
+    lines.append("")
+
+    # Cash is King
+    ck = filters.get("cash_is_king", {})
+    lines.append("### Cash is King Filter (Free Cash Flow Yield)")
+    lines.append("")
+    lines.append(f"**Verdict:** {ck.get('verdict', 'N/A')}")
+    lines.append("")
+    lines.append(f"- FCF yield: {_pct(ck.get('fcf_yield'))}")
+    if ck.get("fcf_margin") is not None:
+        lines.append(f"- FCF margin: {_pct(ck.get('fcf_margin'))}")
+    lines.append(f"- {ck.get('interpretation', '')}")
+    lines.append("")
+    lines.append(
+        '*"Profit is an opinion, but cash is a fact." This filter ensures '
+        "the company generates real liquid wealth, not just accounting "
+        "entries.*"
+    )
+
+    return "\n".join(lines)
+
+
 def _build_risk_assessment(profile: dict[str, Any]) -> str:
     """Build risk assessment section."""
     mc = profile.get("monte_carlo", {})
@@ -503,6 +588,7 @@ def _build_fallback_report(profile: dict[str, Any]) -> str:
         linked_entities=_build_linked_entities_section(profile),
         macro_environment=_build_macro_section(profile),
         regime_analysis=_build_regime_analysis(profile),
+        ethical_filters=_build_ethical_filters_section(profile),
         risk_assessment=_build_risk_assessment(profile),
         limitations=_build_limitations(profile),
     )

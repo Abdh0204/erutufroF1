@@ -471,6 +471,35 @@ def _build_estimation_section(
         return {"available": False, "error": str(exc)}
 
 
+def _build_ethical_filters_section(
+    cache: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Run the four ethical filters and return the combined result."""
+    if cache is None or cache.empty:
+        return {
+            "available": False,
+            "purchasing_power": {"available": False, "verdict": "UNAVAILABLE"},
+            "solvency": {"available": False, "verdict": "UNAVAILABLE"},
+            "gharar": {"available": False, "verdict": "UNAVAILABLE"},
+            "cash_is_king": {"available": False, "verdict": "UNAVAILABLE"},
+        }
+    try:
+        from operator1.analysis.ethical_filters import compute_all_ethical_filters
+        result = compute_all_ethical_filters(cache)
+        result["available"] = True
+        return result
+    except Exception as exc:
+        logger.warning("Ethical filter computation failed: %s", exc)
+        return {
+            "available": False,
+            "error": str(exc),
+            "purchasing_power": {"available": False, "verdict": "UNAVAILABLE"},
+            "solvency": {"available": False, "verdict": "UNAVAILABLE"},
+            "gharar": {"available": False, "verdict": "UNAVAILABLE"},
+            "cash_is_king": {"available": False, "verdict": "UNAVAILABLE"},
+        }
+
+
 def _build_failed_modules_section(
     *,
     regime_result: dict[str, Any] | None = None,
@@ -639,6 +668,7 @@ def build_company_profile(
         "predictions": _build_predictions_section(prediction_result),
         "monte_carlo": _build_monte_carlo_section(mc_result),
         "model_metrics": _build_model_metrics_section(forecast_result),
+        "filters": _build_ethical_filters_section(cache),
         "data_quality": _build_data_quality_section(quality_report_path),
         "estimation": _build_estimation_section(estimation_coverage_path),
         "failed_modules": _build_failed_modules_section(

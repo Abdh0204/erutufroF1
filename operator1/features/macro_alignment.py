@@ -96,14 +96,20 @@ def _align_yearly_to_daily(
     daily_years = daily_index.year
 
     result = pd.Series(np.nan, index=daily_index, name=variable_name, dtype=float)
+    # Track which publication year backs each daily value (for staleness).
+    asof_year = pd.Series(np.nan, index=daily_index, name=f"{variable_name}_asof_year", dtype=float)
 
     for yr in years_available:
         mask = daily_years >= yr
         result = result.where(~mask, other=year_values[yr])
+        asof_year = asof_year.where(~mask, other=float(yr))
 
     # Actually we need as-of: for each day, use the latest available year <= day.year
     # The loop above overwrites with later years, so the final result is correct:
     # the last year that satisfies year <= day.year wins.
+
+    # Attach as-of year as a Series attribute so the caller can compute staleness.
+    result.attrs["asof_year"] = asof_year
 
     return result
 
@@ -187,6 +193,7 @@ def align_macro_to_daily(
         ``is_missing_*`` companion flags.
     """
     result = pd.DataFrame(index=daily_index)
+    stale_threshold_days = 365
 
     for canonical_name, yearly_df in macro_dataset.indicators.items():
         logger.info("Aligning macro variable: %s ...", canonical_name)
@@ -196,20 +203,48 @@ def align_macro_to_daily(
         result[canonical_name] = aligned_series
         result[f"is_missing_{canonical_name}"] = aligned_series.isna().astype(int)
 
+        # Staleness tracking (spec Section D.2):
+        #   macro_asof_date_<var> = date of the publication backing this value
+        #   is_stale_<var> = 1 if the value is > 365 days old
+        asof_year = aligned_series.attrs.get("asof_year")
+        if asof_year is not None:
+            # Convert publication year to a date (assume Dec 31 of that year)
+            asof_date = pd.to_datetime(
+                asof_year.dropna().astype(int).astype(str) + "-12-31",
+                errors="coerce",
+            ).reindex(daily_index)
+            result[f"macro_asof_date_{canonical_name}"] = asof_date
+            # Stale = difference between daily date and publication date > threshold
+            day_delta = (daily_index.to_series().reset_index(drop=True) - asof_date.reset_index(drop=True)).dt.days
+            day_delta.index = daily_index
+            result[f"is_stale_{canonical_name}"] = (day_delta > stale_threshold_days).astype(int)
+            result.loc[asof_date.isna(), f"is_stale_{canonical_name}"] = 1
+        else:
+            result[f"macro_asof_date_{canonical_name}"] = pd.NaT
+            result[f"is_stale_{canonical_name}"] = result[f"is_missing_{canonical_name}"]
+
     # Mark explicitly missing indicators
     for missing_name in macro_dataset.missing:
         if missing_name not in result.columns:
             result[missing_name] = np.nan
             result[f"is_missing_{missing_name}"] = 1
+            result[f"macro_asof_date_{missing_name}"] = pd.NaT
+            result[f"is_stale_{missing_name}"] = 1
 
     # Compute derived macro variables
     result = _compute_inflation_daily(result)
 
+    stale_count = sum(
+        1 for col in result.columns
+        if col.startswith("is_stale_") and (result[col] == 1).all()
+    )
     logger.info(
-        "Macro alignment complete: %d variables aligned to %d days, %d missing",
+        "Macro alignment complete: %d variables aligned to %d days, "
+        "%d missing, %d fully stale",
         len(macro_dataset.indicators),
         len(daily_index),
         len(macro_dataset.missing),
+        stale_count,
     )
 
     return result

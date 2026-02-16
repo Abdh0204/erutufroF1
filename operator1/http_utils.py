@@ -218,6 +218,33 @@ def clear_request_log() -> None:
     _request_log.clear()
 
 
+def flush_request_log(path: str = "cache/request_log.jsonl") -> None:
+    """Persist the in-memory request log to disk as JSON-Lines.
+
+    Per spec Section D.4: store request metadata in ``cache/request_log.jsonl``
+    with fields: endpoint, params hash, timestamp, status, latency, retries,
+    error (if any).
+
+    Parameters
+    ----------
+    path:
+        Output file path (appends if file exists).
+    """
+    import json
+    from pathlib import Path
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out, "a", encoding="utf-8") as fh:
+        for entry in _request_log:
+            fh.write(json.dumps(entry, default=str) + "\n")
+
+    count = len(_request_log)
+    _request_log.clear()
+    logger.info("Flushed %d request log entries to %s", count, out)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
