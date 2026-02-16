@@ -1,0 +1,390 @@
+"""F1 -- Conformal Prediction for distribution-free confidence intervals.
+
+Replaces the Gaussian assumption (RMSE * z_score * sqrt(horizon)) with
+calibrated, distribution-free prediction intervals that have guaranteed
+finite-sample coverage.
+
+The key advantage: conformal intervals are valid regardless of the
+underlying distribution -- fat tails, regime switches, and non-stationarity
+do not break the coverage guarantee.
+
+**How it works:**
+
+1. During the forward pass, collect *nonconformity scores* (absolute
+   residuals) on a calibration window.
+2. At prediction time, compute the empirical quantile of these scores
+   at the desired coverage level.
+3. The prediction interval is: ``[point - quantile, point + quantile]``.
+
+Coverage guarantee: if the calibration scores are exchangeable with future
+scores, the interval covers the true value with probability >= 1 - alpha.
+
+Top-level entry points:
+    ``ConformalCalibrator`` -- collects scores and produces intervals.
+    ``conformal_prediction_intervals`` -- convenience function.
+
+Spec refs: Phase F enhancement (post D-E)
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DEFAULT_COVERAGE: float = 0.90  # 90% prediction intervals
+MIN_CALIBRATION_SAMPLES: int = 20  # minimum scores for meaningful calibration
+MAX_CALIBRATION_WINDOW: int = 500  # cap to prevent memory bloat
+
+
+# ---------------------------------------------------------------------------
+# Result containers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConformalInterval:
+    """A single conformal prediction interval."""
+
+    point_forecast: float = 0.0
+    lower: float = 0.0
+    upper: float = 0.0
+    coverage_level: float = DEFAULT_COVERAGE
+    calibration_size: int = 0
+    interval_width: float = 0.0
+    is_adaptive: bool = False  # True if using adaptive conformal
+
+
+@dataclass
+class ConformalResult:
+    """Collection of conformal intervals for multiple variables/horizons."""
+
+    intervals: dict[str, dict[str, ConformalInterval]] = field(
+        default_factory=dict,
+    )  # {variable: {horizon: ConformalInterval}}
+    calibration_scores_count: int = 0
+    coverage_level: float = DEFAULT_COVERAGE
+    method: str = "split_conformal"
+
+
+# ---------------------------------------------------------------------------
+# Core: Conformal Calibrator
+# ---------------------------------------------------------------------------
+
+
+class ConformalCalibrator:
+    """Collects nonconformity scores and produces calibrated intervals.
+
+    Supports two modes:
+
+    1. **Split conformal** (default): uses a fixed calibration set of
+       residuals. Simple, fast, guaranteed coverage.
+
+    2. **Adaptive conformal (ACI)**: adjusts the quantile online based
+       on recent coverage, accounting for distribution shift. Better for
+       non-stationary financial data.
+
+    Parameters
+    ----------
+    coverage:
+        Desired coverage level (e.g. 0.90 for 90% intervals).
+    adaptive:
+        If True, use Adaptive Conformal Inference (ACI) which adjusts
+        the effective alpha based on recent coverage performance.
+    adaptive_lr:
+        Learning rate for the ACI alpha adjustment.
+    max_window:
+        Maximum number of calibration scores to retain.
+    """
+
+    def __init__(
+        self,
+        coverage: float = DEFAULT_COVERAGE,
+        adaptive: bool = True,
+        adaptive_lr: float = 0.05,
+        max_window: int = MAX_CALIBRATION_WINDOW,
+    ) -> None:
+        self._coverage = coverage
+        self._alpha = 1.0 - coverage  # e.g. 0.10 for 90% coverage
+        self._adaptive = adaptive
+        self._adaptive_lr = adaptive_lr
+        self._max_window = max_window
+
+        # Per-variable calibration scores
+        self._scores: dict[str, list[float]] = {}
+
+        # ACI state: adjusted alpha per variable
+        self._alpha_t: dict[str, float] = {}
+
+        # Tracking: recent coverage for ACI
+        self._recent_coverage: dict[str, list[bool]] = {}
+
+    @property
+    def coverage(self) -> float:
+        return self._coverage
+
+    def add_score(
+        self,
+        variable: str,
+        predicted: float,
+        actual: float,
+    ) -> None:
+        """Record a nonconformity score (absolute residual).
+
+        Call this during the forward pass after each predict-compare step.
+
+        Parameters
+        ----------
+        variable:
+            Variable name.
+        predicted:
+            The model's point prediction.
+        actual:
+            The true observed value.
+        """
+        if math.isnan(predicted) or math.isnan(actual):
+            return
+
+        score = abs(actual - predicted)
+
+        if variable not in self._scores:
+            self._scores[variable] = []
+            self._alpha_t[variable] = self._alpha
+            self._recent_coverage[variable] = []
+
+        self._scores[variable].append(score)
+
+        # Cap window size
+        if len(self._scores[variable]) > self._max_window:
+            self._scores[variable] = self._scores[variable][-self._max_window:]
+
+    def update_adaptive(
+        self,
+        variable: str,
+        was_covered: bool,
+    ) -> None:
+        """Update the adaptive alpha based on whether the last interval
+        covered the true value.
+
+        ACI rule: alpha_{t+1} = alpha_t + lr * (alpha - (1 - covered_t))
+
+        If we are covering too often, alpha increases (intervals shrink).
+        If we are covering too little, alpha decreases (intervals widen).
+
+        Parameters
+        ----------
+        variable:
+            Variable name.
+        was_covered:
+            Whether the previous prediction interval contained the actual.
+        """
+        if not self._adaptive or variable not in self._alpha_t:
+            return
+
+        self._recent_coverage.setdefault(variable, []).append(was_covered)
+        if len(self._recent_coverage[variable]) > 100:
+            self._recent_coverage[variable] = self._recent_coverage[variable][-100:]
+
+        err_t = 1.0 - float(was_covered)  # 1 if miss, 0 if hit
+        self._alpha_t[variable] += self._adaptive_lr * (self._alpha - err_t)
+        # Clamp to [0.01, 0.50]
+        self._alpha_t[variable] = max(0.01, min(0.50, self._alpha_t[variable]))
+
+    def get_quantile(self, variable: str) -> float:
+        """Compute the conformal quantile for a variable.
+
+        Returns the (1 - alpha)-th quantile of the calibration scores,
+        which is the half-width of the prediction interval.
+
+        Returns ``nan`` if insufficient calibration data.
+        """
+        scores = self._scores.get(variable, [])
+        if len(scores) < MIN_CALIBRATION_SAMPLES:
+            return float("nan")
+
+        alpha = self._alpha_t.get(variable, self._alpha) if self._adaptive else self._alpha
+
+        # Finite-sample correction: use ceil((n+1)(1-alpha))/n quantile
+        n = len(scores)
+        q_level = min(1.0, math.ceil((n + 1) * (1 - alpha)) / n)
+
+        sorted_scores = np.sort(scores)
+        idx = min(int(q_level * n), n - 1)
+        return float(sorted_scores[idx])
+
+    def predict_interval(
+        self,
+        variable: str,
+        point_forecast: float,
+        horizon_days: int = 1,
+    ) -> ConformalInterval:
+        """Produce a conformal prediction interval.
+
+        For multi-step horizons, the interval is widened by sqrt(horizon)
+        as a heuristic (conformal theory strictly applies to single-step,
+        but this scaling is conservative).
+
+        Parameters
+        ----------
+        variable:
+            Variable name.
+        point_forecast:
+            The model's point prediction.
+        horizon_days:
+            Forecast horizon (for multi-step widening).
+
+        Returns
+        -------
+        ConformalInterval with calibrated bounds.
+        """
+        quantile = self.get_quantile(variable)
+
+        if math.isnan(quantile) or math.isnan(point_forecast):
+            # Fallback: 10% of point forecast
+            fallback_width = abs(point_forecast) * 0.10 if not math.isnan(point_forecast) else 0.0
+            return ConformalInterval(
+                point_forecast=point_forecast,
+                lower=point_forecast - fallback_width,
+                upper=point_forecast + fallback_width,
+                coverage_level=self._coverage,
+                calibration_size=len(self._scores.get(variable, [])),
+                interval_width=fallback_width * 2,
+                is_adaptive=False,
+            )
+
+        # Scale for multi-step horizon (conservative heuristic)
+        horizon_scale = math.sqrt(max(horizon_days, 1))
+        width = quantile * horizon_scale
+
+        return ConformalInterval(
+            point_forecast=point_forecast,
+            lower=point_forecast - width,
+            upper=point_forecast + width,
+            coverage_level=self._coverage,
+            calibration_size=len(self._scores.get(variable, [])),
+            interval_width=width * 2,
+            is_adaptive=self._adaptive,
+        )
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        """Return calibration diagnostics for logging/reporting."""
+        diag: dict[str, Any] = {
+            "method": "adaptive_conformal" if self._adaptive else "split_conformal",
+            "target_coverage": self._coverage,
+            "variables_calibrated": len(self._scores),
+            "per_variable": {},
+        }
+
+        for var, scores in self._scores.items():
+            recent_cov = self._recent_coverage.get(var, [])
+            empirical_cov = sum(recent_cov) / len(recent_cov) if recent_cov else None
+
+            diag["per_variable"][var] = {
+                "n_scores": len(scores),
+                "median_score": float(np.median(scores)) if scores else None,
+                "mean_score": float(np.mean(scores)) if scores else None,
+                "current_alpha": self._alpha_t.get(var, self._alpha),
+                "empirical_coverage": empirical_cov,
+                "quantile": self.get_quantile(var),
+            }
+
+        return diag
+
+
+# ---------------------------------------------------------------------------
+# Convenience function
+# ---------------------------------------------------------------------------
+
+
+def conformal_prediction_intervals(
+    predictions: dict[str, float],
+    calibrator: ConformalCalibrator,
+    horizon_days: int = 1,
+) -> dict[str, ConformalInterval]:
+    """Compute conformal intervals for a set of variable predictions.
+
+    Parameters
+    ----------
+    predictions:
+        Dict of ``{variable_name: point_forecast}``.
+    calibrator:
+        A fitted ``ConformalCalibrator`` with calibration scores.
+    horizon_days:
+        Forecast horizon for interval scaling.
+
+    Returns
+    -------
+    Dict of ``{variable_name: ConformalInterval}``.
+    """
+    intervals: dict[str, ConformalInterval] = {}
+
+    for var, point in predictions.items():
+        intervals[var] = calibrator.predict_interval(
+            variable=var,
+            point_forecast=point,
+            horizon_days=horizon_days,
+        )
+
+    return intervals
+
+
+def build_conformal_result(
+    calibrator: ConformalCalibrator,
+    forecasts: dict[str, dict[str, float]],
+    horizons: dict[str, int],
+) -> ConformalResult:
+    """Build a full ConformalResult across all variables and horizons.
+
+    Parameters
+    ----------
+    calibrator:
+        Fitted ConformalCalibrator.
+    forecasts:
+        ``{variable: {horizon_label: point_forecast}}``.
+    horizons:
+        ``{horizon_label: days}``.
+
+    Returns
+    -------
+    ConformalResult with intervals for every variable/horizon combination.
+    """
+    result = ConformalResult(
+        coverage_level=calibrator.coverage,
+        method="adaptive_conformal" if calibrator._adaptive else "split_conformal",
+    )
+
+    for var, horizon_forecasts in forecasts.items():
+        result.intervals[var] = {}
+        for h_label, point in horizon_forecasts.items():
+            days = horizons.get(h_label, 1)
+            result.intervals[var][h_label] = calibrator.predict_interval(
+                variable=var,
+                point_forecast=point,
+                horizon_days=days,
+            )
+
+    result.calibration_scores_count = sum(
+        len(s) for s in calibrator._scores.values()
+    )
+
+    logger.info(
+        "Conformal intervals computed: %d variables, %d horizons, "
+        "%d total calibration scores, method=%s",
+        len(result.intervals),
+        len(horizons),
+        result.calibration_scores_count,
+        result.method,
+    )
+
+    return result

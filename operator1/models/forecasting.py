@@ -2117,6 +2117,212 @@ class BaselineWrapper(BaseModelWrapper):
             self._update_error = str(exc)
 
 
+class TFTWrapper(BaseModelWrapper):
+    """Temporal Fusion Transformer wrapper for mixed-frequency data.
+
+    TFT is purpose-built for time series with:
+    - Static metadata (sector, country, industry)
+    - Known future inputs (calendar features, earnings dates)
+    - Observed inputs at different frequencies (daily prices, quarterly statements)
+
+    Falls back gracefully if pytorch-forecasting is not installed.
+
+    Parameters
+    ----------
+    cache:
+        Full daily cache with all features.
+    target_col:
+        Name of the target variable to predict.
+    static_features:
+        Dict of static metadata (e.g. sector, country).
+    lookback:
+        Number of historical days to use as encoder input.
+    """
+
+    name = "tft"
+
+    def __init__(
+        self,
+        cache: pd.DataFrame,
+        target_col: str,
+        *,
+        static_features: dict[str, str] | None = None,
+        lookback: int = 60,
+        hidden_size: int = 16,
+        n_heads: int = 2,
+        max_epochs: int = 20,
+        lr: float = 0.005,
+    ) -> None:
+        self._target_col = target_col
+        self._lookback = lookback
+        self._fitted = False
+        self._model: Any = None
+        self._trainer: Any = None
+        self._scaler_mean = 0.0
+        self._scaler_std = 1.0
+        self._last_pred = 0.0
+        self._history: list[float] = []
+
+        clean = cache[target_col].dropna()
+        if len(clean) < lookback + 30:
+            return
+
+        self._history = list(clean.values)
+        self._scaler_mean = float(clean.mean())
+        self._scaler_std = float(clean.std()) or 1.0
+
+        try:
+            import torch
+            import torch.nn as nn
+
+            # Simplified TFT-inspired model: multi-head attention over
+            # historical features with gating.
+            # Full pytorch-forecasting TFT requires complex data setup;
+            # this is a practical self-attention model that captures the
+            # core TFT idea of variable selection + temporal attention.
+
+            class _GatedResidualNetwork(nn.Module):
+                """GRN block from the TFT paper."""
+
+                def __init__(self, d_in: int, d_hidden: int, d_out: int) -> None:
+                    super().__init__()
+                    self.fc1 = nn.Linear(d_in, d_hidden)
+                    self.fc2 = nn.Linear(d_hidden, d_out)
+                    self.gate = nn.Linear(d_hidden, d_out)
+                    self.ln = nn.LayerNorm(d_out)
+                    self.skip = nn.Linear(d_in, d_out) if d_in != d_out else nn.Identity()
+
+                def forward(self, x: Any) -> Any:
+                    h = torch.elu(self.fc1(x))
+                    h2 = self.fc2(h)
+                    g = torch.sigmoid(self.gate(h))
+                    out = g * h2
+                    return self.ln(out + self.skip(x))
+
+            class _MiniTFT(nn.Module):
+                """Simplified TFT: variable selection + temporal self-attention."""
+
+                def __init__(self, n_features: int, d_model: int, n_heads: int) -> None:
+                    super().__init__()
+                    self.input_proj = _GatedResidualNetwork(n_features, d_model * 2, d_model)
+                    self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+                    self.grn_out = _GatedResidualNetwork(d_model, d_model * 2, d_model)
+                    self.fc_out = nn.Linear(d_model, 1)
+
+                def forward(self, x: Any) -> Any:
+                    # x: (batch, seq_len, n_features)
+                    h = self.input_proj(x)  # (batch, seq_len, d_model)
+                    attn_out, _ = self.attn(h, h, h)  # self-attention
+                    h = self.grn_out(attn_out)
+                    # Take last timestep
+                    return self.fc_out(h[:, -1, :])
+
+            # Prepare features: use numeric columns from cache
+            numeric_cols = [
+                c for c in cache.columns
+                if cache[c].dtype in (np.float64, np.float32, np.int64)
+            ][:20]  # cap at 20 features
+            if target_col not in numeric_cols:
+                numeric_cols = [target_col] + numeric_cols[:19]
+
+            feature_data = cache[numeric_cols].fillna(0).values
+            n_features = len(numeric_cols)
+
+            # Normalise
+            feat_mean = feature_data.mean(axis=0)
+            feat_std = feature_data.std(axis=0)
+            feat_std[feat_std < 1e-8] = 1.0
+            scaled = (feature_data - feat_mean) / feat_std
+
+            self._feat_mean = feat_mean
+            self._feat_std = feat_std
+            self._numeric_cols = numeric_cols
+
+            # Build sequences
+            X_seqs, y_seqs = [], []
+            target_idx = numeric_cols.index(target_col) if target_col in numeric_cols else 0
+            for i in range(len(scaled) - lookback):
+                X_seqs.append(scaled[i:i + lookback])
+                y_seqs.append(scaled[i + lookback, target_idx])
+
+            if len(X_seqs) < 20:
+                return
+
+            X_t = torch.FloatTensor(np.array(X_seqs))
+            y_t = torch.FloatTensor(np.array(y_seqs)).unsqueeze(-1)
+
+            self._model = _MiniTFT(n_features, hidden_size, n_heads)
+            optimizer = torch.optim.Adam(self._model.parameters(), lr=lr)
+            criterion = nn.MSELoss()
+
+            self._model.train()
+            for epoch in range(max_epochs):
+                optimizer.zero_grad()
+                pred = self._model(X_t)
+                loss = criterion(pred, y_t)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
+                optimizer.step()
+
+            self._fitted = True
+            logger.info("TFT wrapper fitted for %s (%d sequences, %d features)", target_col, len(X_seqs), n_features)
+
+        except ImportError:
+            logger.info("PyTorch not available for TFT -- skipping")
+        except Exception as exc:
+            logger.warning("TFT fitting failed for %s: %s", target_col, exc)
+
+    def predict(self, state_t: np.ndarray) -> np.ndarray:
+        if not self._fitted or self._model is None:
+            return np.array([self._history[-1]]) if self._history else np.zeros(1)
+
+        try:
+            import torch
+
+            # Use last lookback values from history
+            if len(self._history) < self._lookback:
+                return np.array([self._history[-1]])
+
+            # Build feature sequence from recent history (simplified: use target only)
+            recent = np.array(self._history[-self._lookback:]).reshape(-1, 1)
+            # Pad to n_features if needed
+            n_feat = len(self._numeric_cols)
+            if recent.shape[1] < n_feat:
+                padded = np.zeros((self._lookback, n_feat))
+                padded[:, 0] = recent[:, 0]
+                recent = padded
+
+            # Normalise
+            scaled = (recent - self._feat_mean[:recent.shape[1]]) / self._feat_std[:recent.shape[1]]
+
+            x = torch.FloatTensor(scaled).unsqueeze(0)
+            self._model.eval()
+            with torch.no_grad():
+                pred_scaled = float(self._model(x).item())
+
+            pred = pred_scaled * self._scaler_std + self._scaler_mean
+            self._last_pred = pred
+            return np.array([pred])
+
+        except Exception:
+            return np.array([self._history[-1]]) if self._history else np.zeros(1)
+
+    def update(
+        self,
+        state_t: np.ndarray,
+        actual_t_plus_1: np.ndarray,
+        hierarchy_weights: dict[str, float],
+    ) -> None:
+        try:
+            val = float(actual_t_plus_1[0])
+            if not np.isnan(val):
+                self._history.append(val)
+            self.failed_update = False
+        except Exception as exc:
+            self.failed_update = True
+            self._update_error = str(exc)
+
+
 # ---------------------------------------------------------------------------
 # D2: Regime-weighted historical training windows
 # ---------------------------------------------------------------------------
@@ -2227,6 +2433,14 @@ def _init_model_wrappers(
     w = LSTMWrapper(series, hidden_size=_LSTM_HIDDEN, lookback=_LSTM_LOOKBACK)
     if w._fitted:
         wrappers.append(w)
+
+    # TFT (Temporal Fusion Transformer -- for mixed-frequency data)
+    try:
+        w = TFTWrapper(cache, variable, lookback=min(60, len(cache) // 3))
+        if w._fitted:
+            wrappers.append(w)
+    except Exception as exc:
+        logger.debug("TFT init failed for %s: %s", variable, exc)
 
     # Baseline (always succeeds)
     wrappers.append(BaselineWrapper(series))

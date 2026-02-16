@@ -22,6 +22,10 @@ torch>=2.0
 # T6.1: Bayesian change-point detection (used in regime_detector.py)
 pymc>=5.0
 
+# Phase F: Advanced modules
+shap>=0.42             # SHAP explainability (F2)
+mapie>=0.8             # Conformal prediction alternative (F1)
+
 # Not yet implemented -- uncomment when adding these modules:
 # SALib>=1.4          # Sobol sensitivity analysis
 # TA-Lib>=0.4         # Candlestick pattern detection
