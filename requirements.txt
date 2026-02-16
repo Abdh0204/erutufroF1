@@ -6,14 +6,17 @@ numpy>=1.23
 pyarrow>=10.0
 pyyaml>=6.0
 
-# Temporal modeling (Phase 6 -- install when needed)
-# statsmodels>=0.14
+# Temporal modeling -- Phase 6
+# T6.1: regime detection + causality
+statsmodels>=0.14
+scikit-learn>=1.2
+ruptures>=1.1
+hmmlearn>=0.3
+
+# T6.2+ (install when needed)
 # arch>=6.0
-# scikit-learn>=1.2
 # xgboost>=1.7
 # torch>=2.0
-# ruptures>=1.1
-# hmmlearn>=0.3
 # pymc>=5.0
 # SALib>=1.4
 # TA-Lib>=0.4
