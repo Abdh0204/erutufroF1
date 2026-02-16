@@ -663,6 +663,51 @@ def _build_predictions_forecasts(profile: dict[str, Any]) -> str:
         lines.append(f"- Base case (50th percentile): {_fmt(mc.get('p50'))}")
         lines.append(f"- Upside (95th percentile): {_fmt(mc.get('p95'))}")
 
+    # Conformal prediction intervals
+    conformal = profile.get("conformal_intervals", {})
+    if conformal:
+        lines.append("")
+        lines.append("### Conformal Prediction Intervals")
+        lines.append("")
+        lines.append("*Distribution-free intervals with guaranteed coverage (no Gaussian assumption):*")
+        lines.append("")
+        for var, intervals in list(conformal.items())[:10]:
+            if isinstance(intervals, dict):
+                for h, interval in intervals.items():
+                    if isinstance(interval, dict):
+                        lines.append(
+                            f"- **{var}** ({h}): "
+                            f"[{_fmt(interval.get('lower'))}, {_fmt(interval.get('upper'))}] "
+                            f"(width: {_fmt(interval.get('interval_width'))})"
+                        )
+
+    # SHAP explanations
+    shap_data = profile.get("shap_explanations", {})
+    if shap_data.get("available"):
+        lines.append("")
+        lines.append("### What Drove These Predictions (SHAP Analysis)")
+        lines.append("")
+        per_var = shap_data.get("per_variable", {})
+        for var, exp in list(per_var.items())[:8]:
+            narrative = exp.get("narrative", "")
+            if narrative:
+                lines.append(f"- **{var}:** {narrative}")
+            else:
+                drivers = exp.get("top_drivers", [])
+                parts = []
+                for d in drivers[:3]:
+                    sign = "+" if d.get("shap_value", 0) > 0 else ""
+                    parts.append(f"{sign}{_fmt(d.get('shap_value'))} from {d.get('feature', '?')}")
+                if parts:
+                    lines.append(f"- **{var}:** {'; '.join(parts)}")
+
+        global_imp = shap_data.get("global_feature_importance", {})
+        if global_imp:
+            lines.append("")
+            lines.append("**Top global feature drivers (across all predictions):**")
+            for feat, importance in list(global_imp.items())[:5]:
+                lines.append(f"- {feat}: {_fmt(importance, '.4f')} mean |SHAP|")
+
     return "\n".join(lines)
 
 
@@ -764,21 +809,66 @@ def _build_appendix(profile: dict[str, Any]) -> str:
 
     lines.append("### Methodology Summary")
     lines.append("")
-    lines.append("This analysis uses 20+ mathematical modules including:")
-    lines.append("- **Regime Detection:** HMM (Hidden Markov Model), GMM (Gaussian Mixture Model)")
-    lines.append("- **Structural Breaks:** PELT, Bayesian Change Point Detection")
-    lines.append("- **Forecasting:** Adaptive Kalman Filter, GARCH, VAR, LSTM, Transformer")
-    lines.append("- **Ensemble:** Random Forest, XGBoost, Gradient Boosting")
-    lines.append("- **Causality:** Granger Causality, Transfer Entropy")
-    lines.append("- **Uncertainty:** Regime-Aware Monte Carlo, Importance Sampling")
-    lines.append("- **Sensitivity:** Sobol Global Sensitivity Analysis")
-    lines.append("- **Optimisation:** Genetic Algorithm (ensemble weights)")
+    lines.append("This analysis uses **23+ mathematical modules** across 8 categories:")
+    lines.append("")
+    lines.append("| Category | Modules |")
+    lines.append("|----------|---------|")
+    lines.append("| Regime Detection | HMM (Hidden Markov Model), GMM (Gaussian Mixture), PELT, Bayesian Change Point |")
+    lines.append("| Forecasting | Adaptive Kalman Filter, GARCH, VAR, LSTM, **Temporal Fusion Transformer (TFT)** |")
+    lines.append("| Tree Ensembles | Random Forest, XGBoost, Gradient Boosting |")
+    lines.append("| Causality | Granger Causality, Transfer Entropy, Copula Models |")
+    lines.append("| Uncertainty | **Conformal Prediction** (distribution-free intervals), Regime-Aware Monte Carlo, Importance Sampling |")
+    lines.append("| Explainability | **SHAP** (per-prediction feature attribution), Sobol Global Sensitivity |")
+    lines.append("| Optimisation | Genetic Algorithm (ensemble weight tuning) |")
+    lines.append("| Pattern Recognition | Candlestick Detector, Wavelet/Fourier Decomposition |")
     lines.append("")
 
-    lines.append("### Burn-Out Process")
+    lines.append("### Conformal Prediction")
     lines.append("")
-    lines.append("Intensive re-training on the most recent 6 months of data with "
-                 "convergence-based early stopping (up to 10 iterations, patience=3).")
+    lines.append("Traditional financial models assume returns are normally distributed "
+                 "and compute confidence intervals as RMSE x z-score x sqrt(horizon). "
+                 "**This assumption is wrong** -- financial returns have fat tails and "
+                 "regime switches that break Gaussian models.")
+    lines.append("")
+    lines.append("Conformal Prediction provides **distribution-free** intervals with "
+                 "**guaranteed** finite-sample coverage. If we target 90% coverage, the "
+                 "intervals will contain the true value at least 90% of the time -- regardless "
+                 "of the underlying distribution.")
+    lines.append("")
+    lines.append("We use **Adaptive Conformal Inference (ACI)** which adjusts the interval "
+                 "width online as the data distribution shifts (e.g., during regime changes).")
+    lines.append("")
+
+    lines.append("### SHAP Feature Attribution")
+    lines.append("")
+    lines.append("SHAP (SHapley Additive exPlanations) answers the question: *Why did "
+                 "the model make this specific prediction?*")
+    lines.append("")
+    lines.append("For each predicted variable, SHAP decomposes the prediction into "
+                 "contributions from individual features. For example: \"debt-to-equity "
+                 "is predicted to rise 8% primarily because: +3.2% from rising long-term "
+                 "debt, +2.1% from declining equity, -0.8% from strong cash position.\"")
+    lines.append("")
+
+    lines.append("### Temporal Fusion Transformer (TFT)")
+    lines.append("")
+    lines.append("TFT is a deep learning architecture purpose-built for mixed-frequency "
+                 "time series. Unlike LSTM which treats all inputs equally, TFT uses:")
+    lines.append("- **Variable selection gates** to learn which features matter")
+    lines.append("- **Multi-head self-attention** to focus on relevant historical days")
+    lines.append("- **Gated Residual Networks** for stable, deep learning")
+    lines.append("")
+    lines.append("This is particularly valuable for our data which mixes daily prices, "
+                 "quarterly financial statements, and annual macro indicators.")
+    lines.append("")
+
+    lines.append("### Forward Pass & Burn-Out Process")
+    lines.append("")
+    lines.append("The temporal engine uses a **day-by-day forward pass**: for each of "
+                 "~500 trading days, it predicts the next day, compares with actual data, "
+                 "and updates model parameters online. This is followed by a "
+                 "**convergence-based burn-out** phase: intensive re-training on the most "
+                 "recent 6 months with up to 10 iterations and patience-based early stopping.")
     lines.append("")
 
     lines.append("### Variable Tier Definitions")
