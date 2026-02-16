@@ -201,6 +201,93 @@ def compute_ensemble_weights(
     return {name: w / total for name, w in inv_rmse.items()}
 
 
+def optimise_ensemble_weights_ga(
+    metrics: list[ModelMetrics],
+    *,
+    population_size: int = 50,
+    generations: int = 30,
+    random_state: int = 42,
+) -> dict[str, float]:
+    """Optimise ensemble weights using a genetic algorithm.
+
+    Spec reference: The_Apps_core_idea.pdf Section E.2 Category 4
+    (Genetic Algorithm for Meta-Optimization).
+
+    Falls back to inverse-RMSE weights if the GA library (deap) is
+    not installed or optimisation fails.
+
+    Parameters
+    ----------
+    metrics:
+        List of ``ModelMetrics`` from ``ForecastResult.metrics``.
+    population_size:
+        Number of individuals in the GA population.
+    generations:
+        Number of evolutionary generations.
+    random_state:
+        Seed for reproducibility.
+
+    Returns
+    -------
+    Dict mapping ``model_name`` to optimised weight (sum = 1.0).
+    """
+    # Collect fitted models with valid RMSE
+    model_rmse: dict[str, float] = {}
+    for m in metrics:
+        if not m.fitted or math.isnan(m.rmse) or m.rmse < MIN_RMSE_FOR_WEIGHTING:
+            continue
+        name = m.model_name
+        if name not in model_rmse or m.rmse < model_rmse[name]:
+            model_rmse[name] = m.rmse
+
+    if len(model_rmse) < 2:
+        return compute_ensemble_weights(metrics)
+
+    model_names = list(model_rmse.keys())
+    n_models = len(model_names)
+    rmse_array = np.array([model_rmse[n] for n in model_names])
+
+    try:
+        from scipy.optimize import differential_evolution
+
+        def objective(weights: np.ndarray) -> float:
+            """Minimise weighted RMSE (proxy for ensemble loss)."""
+            w = np.abs(weights)
+            w_sum = w.sum()
+            if w_sum <= 0:
+                return 1e10
+            w = w / w_sum
+            return float(np.dot(w, rmse_array))
+
+        bounds = [(0.01, 1.0)] * n_models
+        result = differential_evolution(
+            objective,
+            bounds,
+            maxiter=generations,
+            popsize=population_size,
+            seed=random_state,
+            tol=1e-6,
+        )
+
+        opt_weights = np.abs(result.x)
+        opt_weights /= opt_weights.sum()
+
+        logger.info(
+            "GA ensemble optimisation converged (gen=%d): %s",
+            generations,
+            {n: round(float(w), 4) for n, w in zip(model_names, opt_weights)},
+        )
+
+        return {n: float(w) for n, w in zip(model_names, opt_weights)}
+
+    except ImportError:
+        logger.info("scipy.optimize not available for GA -- using inverse-RMSE")
+        return compute_ensemble_weights(metrics)
+    except Exception as exc:
+        logger.warning("GA optimisation failed: %s -- using inverse-RMSE", exc)
+        return compute_ensemble_weights(metrics)
+
+
 # ---------------------------------------------------------------------------
 # Forecast aggregation
 # ---------------------------------------------------------------------------

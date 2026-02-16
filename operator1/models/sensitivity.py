@@ -1,0 +1,259 @@
+"""C6 -- Sobol global sensitivity analysis.
+
+Decomposes prediction variance to identify which decision/linked
+variables are the key drivers of the model output. Validates the
+survival hierarchy by comparing Sobol indices against tier weights.
+
+Spec reference: The_Apps_core_idea.pdf Section E.2 Category 4.
+
+Falls back to a permutation-based importance measure if SALib is
+not installed.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SobolResult:
+    """Result from Sobol sensitivity analysis."""
+    # First-order Sobol indices: {variable: S1}
+    first_order: dict[str, float] = field(default_factory=dict)
+    # Total-order Sobol indices: {variable: ST}
+    total_order: dict[str, float] = field(default_factory=dict)
+    # Tier-level aggregated importance: {tier: importance}
+    tier_importance: dict[str, float] = field(default_factory=dict)
+    available: bool = True
+    error: str = ""
+    method: str = "sobol"  # "sobol" or "permutation_fallback"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "error": self.error,
+            "method": self.method,
+            "first_order": self.first_order,
+            "total_order": self.total_order,
+            "tier_importance": self.tier_importance,
+        }
+
+
+def _load_tier_map() -> dict[str, int]:
+    """Load variable -> tier mapping from config."""
+    try:
+        from operator1.config_loader import load_config
+        cfg = load_config("survival_hierarchy")
+        tier_map: dict[str, int] = {}
+        for tier_key, tier_data in cfg.get("tiers", {}).items():
+            tier_num = int(tier_key.replace("tier", ""))
+            for var in tier_data.get("variables", []):
+                tier_map[var] = tier_num
+        return tier_map
+    except Exception:
+        return {}
+
+
+def _try_sobol(
+    X: np.ndarray,
+    y: np.ndarray,
+    variable_names: list[str],
+    n_samples: int = 512,
+) -> tuple[dict[str, float], dict[str, float]] | None:
+    """Attempt SALib-based Sobol analysis. Returns None if SALib unavailable."""
+    try:
+        from SALib.sample import saltelli
+        from SALib.analyze import sobol as sobol_analyze
+        from sklearn.ensemble import GradientBoostingRegressor
+    except ImportError:
+        logger.info("SALib not available, falling back to permutation importance")
+        return None
+
+    n_vars = X.shape[1]
+    if n_vars < 2 or len(y) < 50:
+        return None
+
+    # Define the problem for SALib
+    problem = {
+        "num_vars": n_vars,
+        "names": variable_names,
+        "bounds": [
+            [float(X[:, i].min()), float(X[:, i].max())]
+            for i in range(n_vars)
+        ],
+    }
+
+    # Sanitise bounds (SALib requires lb < ub)
+    for i, (lb, ub) in enumerate(problem["bounds"]):
+        if lb >= ub:
+            problem["bounds"][i] = [lb - 1.0, ub + 1.0]
+
+    try:
+        # Train a surrogate model
+        model = GradientBoostingRegressor(
+            n_estimators=50, max_depth=4, random_state=42,
+        )
+        model.fit(X, y)
+
+        # Generate Sobol sample
+        param_values = saltelli.sample(problem, n_samples, calc_second_order=False)
+
+        # Clip to training bounds
+        for i in range(n_vars):
+            param_values[:, i] = np.clip(
+                param_values[:, i],
+                problem["bounds"][i][0],
+                problem["bounds"][i][1],
+            )
+
+        # Evaluate surrogate
+        Y = model.predict(param_values)
+
+        # Analyse
+        Si = sobol_analyze.analyze(problem, Y, calc_second_order=False)
+
+        first_order = {
+            name: max(0.0, float(Si["S1"][i]))
+            for i, name in enumerate(variable_names)
+        }
+        total_order = {
+            name: max(0.0, float(Si["ST"][i]))
+            for i, name in enumerate(variable_names)
+        }
+
+        return first_order, total_order
+
+    except Exception as exc:
+        logger.warning("Sobol analysis failed: %s", exc)
+        return None
+
+
+def _permutation_importance(
+    X: np.ndarray,
+    y: np.ndarray,
+    variable_names: list[str],
+    n_repeats: int = 5,
+) -> dict[str, float]:
+    """Simple permutation importance as a Sobol fallback."""
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.metrics import mean_squared_error
+
+    model = GradientBoostingRegressor(
+        n_estimators=50, max_depth=4, random_state=42,
+    )
+    model.fit(X, y)
+
+    baseline_mse = mean_squared_error(y, model.predict(X))
+    importances: dict[str, float] = {}
+
+    rng = np.random.RandomState(42)
+
+    for i, name in enumerate(variable_names):
+        mse_increases = []
+        for _ in range(n_repeats):
+            X_perm = X.copy()
+            rng.shuffle(X_perm[:, i])
+            perm_mse = mean_squared_error(y, model.predict(X_perm))
+            mse_increases.append(perm_mse - baseline_mse)
+        importances[name] = max(0.0, float(np.mean(mse_increases)))
+
+    # Normalise to sum to 1
+    total = sum(importances.values())
+    if total > 0:
+        importances = {k: v / total for k, v in importances.items()}
+
+    return importances
+
+
+def run_sensitivity_analysis(
+    cache: pd.DataFrame,
+    target_variable: str = "return_1d",
+    feature_variables: list[str] | None = None,
+) -> SobolResult:
+    """Run global sensitivity analysis on the cache.
+
+    Parameters
+    ----------
+    cache:
+        Daily feature table.
+    target_variable:
+        The output variable to decompose variance for.
+    feature_variables:
+        Input variables. If None, auto-detect from tier config.
+
+    Returns
+    -------
+    SobolResult
+    """
+    try:
+        return _run_sensitivity_impl(cache, target_variable, feature_variables)
+    except Exception as exc:
+        logger.warning("Sensitivity analysis failed: %s", exc)
+        return SobolResult(available=False, error=str(exc))
+
+
+def _run_sensitivity_impl(
+    cache: pd.DataFrame,
+    target_variable: str,
+    feature_variables: list[str] | None,
+) -> SobolResult:
+    tier_map = _load_tier_map()
+
+    if feature_variables is None:
+        feature_variables = [v for v in tier_map if v in cache.columns]
+
+    if not feature_variables:
+        return SobolResult(available=False, error="No feature variables found")
+
+    if target_variable not in cache.columns:
+        return SobolResult(
+            available=False, error=f"Target variable '{target_variable}' not in cache",
+        )
+
+    # Prepare clean data
+    cols = feature_variables + [target_variable]
+    df = cache[cols].dropna()
+    if len(df) < 50:
+        return SobolResult(available=False, error="Insufficient data for sensitivity analysis")
+
+    X = df[feature_variables].values
+    y = df[target_variable].values
+
+    # Try Sobol first, fall back to permutation
+    sobol_result = _try_sobol(X, y, feature_variables)
+
+    if sobol_result is not None:
+        first_order, total_order = sobol_result
+        method = "sobol"
+    else:
+        perm_imp = _permutation_importance(X, y, feature_variables)
+        first_order = perm_imp
+        total_order = perm_imp
+        method = "permutation_fallback"
+
+    # Aggregate by tier
+    tier_importance: dict[str, float] = {}
+    for var, imp in total_order.items():
+        tier = tier_map.get(var)
+        if tier is not None:
+            key = f"tier{tier}"
+            tier_importance[key] = tier_importance.get(key, 0.0) + imp
+
+    logger.info(
+        "Sensitivity analysis (%s): %d variables, tier importance: %s",
+        method, len(feature_variables), tier_importance,
+    )
+
+    return SobolResult(
+        first_order=first_order,
+        total_order=total_order,
+        tier_importance=tier_importance,
+        method=method,
+    )

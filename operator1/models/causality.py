@@ -184,6 +184,147 @@ def compute_granger_causality(
 
 
 # ---------------------------------------------------------------------------
+# Transfer Entropy / Information Flow (C5)
+# ---------------------------------------------------------------------------
+
+
+def compute_transfer_entropy(
+    cache: pd.DataFrame,
+    variables: list[str],
+    *,
+    lag: int = 1,
+    n_bins: int = 8,
+) -> pd.DataFrame:
+    """Compute pairwise transfer entropy between variables.
+
+    Transfer entropy measures the directional information flow from
+    variable X to variable Y: how much knowing past X reduces
+    uncertainty about future Y beyond what past Y already tells us.
+
+    Spec reference: The_Apps_core_idea.pdf Section E.2 Category 3
+    (Module 9).
+
+    Uses a binning-based estimator for speed and robustness.
+
+    Parameters
+    ----------
+    cache:
+        Daily cache DataFrame.
+    variables:
+        List of column names to analyse.
+    lag:
+        Time lag for conditional entropy computation.
+    n_bins:
+        Number of histogram bins for discretisation.
+
+    Returns
+    -------
+    pd.DataFrame
+        Square matrix where entry (i, j) = TE from variable j -> i.
+        Higher values mean variable j provides more information about
+        variable i's future.
+    """
+    available = [v for v in variables if v in cache.columns]
+    data = cache[available].dropna()
+
+    if len(data) < 30 or len(available) < 2:
+        logger.warning("Insufficient data for transfer entropy (%d rows, %d vars)", len(data), len(available))
+        return pd.DataFrame(0.0, index=available, columns=available)
+
+    n = len(data)
+    te_matrix = pd.DataFrame(0.0, index=available, columns=available)
+
+    for target_var in available:
+        y_future = data[target_var].values[lag:]
+        y_past = data[target_var].values[:-lag]
+
+        for source_var in available:
+            if source_var == target_var:
+                continue
+
+            x_past = data[source_var].values[:-lag]
+
+            try:
+                te = _binned_transfer_entropy(y_future, y_past, x_past, n_bins)
+                te_matrix.loc[target_var, source_var] = max(0.0, te)
+            except Exception:
+                te_matrix.loc[target_var, source_var] = 0.0
+
+    logger.info(
+        "Transfer entropy computed: %d variables, mean TE = %.4f",
+        len(available), te_matrix.values.mean(),
+    )
+
+    return te_matrix
+
+
+def _binned_transfer_entropy(
+    y_future: np.ndarray,
+    y_past: np.ndarray,
+    x_past: np.ndarray,
+    n_bins: int,
+) -> float:
+    """Compute TE(X -> Y) using histogram binning.
+
+    TE(X->Y) = H(Y_future | Y_past) - H(Y_future | Y_past, X_past)
+
+    where H is conditional entropy computed via joint histograms.
+    """
+    # Digitise each variable into bins
+    yf_bins = _digitise(y_future, n_bins)
+    yp_bins = _digitise(y_past, n_bins)
+    xp_bins = _digitise(x_past, n_bins)
+
+    # H(Y_future | Y_past)
+    h_yf_given_yp = _conditional_entropy(yf_bins, yp_bins, n_bins)
+
+    # H(Y_future | Y_past, X_past) -- condition on joint (yp, xp)
+    joint_cond = yp_bins * n_bins + xp_bins  # unique joint index
+    h_yf_given_yp_xp = _conditional_entropy(yf_bins, joint_cond, n_bins * n_bins)
+
+    return h_yf_given_yp - h_yf_given_yp_xp
+
+
+def _digitise(x: np.ndarray, n_bins: int) -> np.ndarray:
+    """Digitise values into n_bins equal-width bins."""
+    xmin, xmax = x.min(), x.max()
+    if xmax == xmin:
+        return np.zeros(len(x), dtype=int)
+    edges = np.linspace(xmin, xmax, n_bins + 1)
+    return np.clip(np.digitize(x, edges[1:-1]), 0, n_bins - 1)
+
+
+def _conditional_entropy(
+    target: np.ndarray,
+    condition: np.ndarray,
+    n_cond_states: int,
+) -> float:
+    """Compute H(target | condition) using frequency counting."""
+    n = len(target)
+    if n == 0:
+        return 0.0
+
+    # Joint counts
+    cond_unique = np.unique(condition)
+    h_cond = 0.0
+
+    for c in cond_unique:
+        mask = condition == c
+        p_c = mask.sum() / n
+        if p_c == 0:
+            continue
+
+        # Conditional distribution of target given condition = c
+        t_vals = target[mask]
+        _, counts = np.unique(t_vals, return_counts=True)
+        probs = counts / counts.sum()
+        h_given_c = -np.sum(probs * np.log2(probs + 1e-12))
+        h_cond += p_c * h_given_c
+
+    return h_cond
+
+
+# ---------------------------------------------------------------------------
 # Variable pruning
 # ---------------------------------------------------------------------------
 

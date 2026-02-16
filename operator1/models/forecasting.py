@@ -737,6 +737,259 @@ def fit_lstm(
         return _fit_linear_fallback(series, n_forecast, lookback, random_state)
 
 
+# ---------------------------------------------------------------------------
+# C2 -- Transformer Architecture (attention-based forecasting)
+# ---------------------------------------------------------------------------
+
+
+def fit_transformer(
+    series: np.ndarray,
+    n_forecast: int = 1,
+    *,
+    lookback: int = 20,
+    d_model: int = 32,
+    nhead: int = 4,
+    num_layers: int = 2,
+    epochs: int = 40,
+    lr: float = 0.001,
+    random_state: int = 42,
+) -> ForecastResult:
+    """Fit a Transformer encoder model for time series forecasting.
+
+    Spec reference: The_Apps_core_idea.pdf Section E.2 Module 7 alt.
+
+    Uses self-attention to identify which past days/variables matter
+    most for predicting the next step.
+
+    Falls back to linear model on failure.
+    """
+    metrics = ModelMetrics(model_name="transformer")
+
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        metrics.error = "torch not installed"
+        logger.warning("Transformer requires torch -- falling back")
+        arr, fb_metrics = _fit_linear_fallback(series, n_forecast, lookback, random_state)
+        fb_metrics.model_name = "transformer_fallback"
+        return ForecastResult(metrics=[fb_metrics])
+
+    try:
+        clean = series[~np.isnan(series)]
+        if len(clean) < lookback + n_forecast + 10:
+            metrics.error = "Insufficient data for transformer"
+            arr, fb_metrics = _fit_linear_fallback(series, n_forecast, lookback, random_state)
+            fb_metrics.model_name = "transformer_fallback"
+            return ForecastResult(metrics=[fb_metrics])
+
+        # Standardise
+        mu, sigma = clean.mean(), clean.std()
+        if sigma < 1e-10:
+            sigma = 1.0
+        scaled = (clean - mu) / sigma
+
+        # Create sequences
+        X, y = [], []
+        for i in range(len(scaled) - lookback - n_forecast + 1):
+            X.append(scaled[i:i + lookback])
+            y.append(scaled[i + lookback:i + lookback + n_forecast])
+        X_arr = np.array(X)
+        y_arr = np.array(y)
+
+        split = max(1, int(len(X_arr) * 0.8))
+        X_train = torch.FloatTensor(X_arr[:split]).unsqueeze(-1)  # (B, S, 1)
+        y_train = torch.FloatTensor(y_arr[:split])
+        X_test = torch.FloatTensor(X_arr[split:]).unsqueeze(-1)
+        y_test = torch.FloatTensor(y_arr[split:])
+
+        # Positional encoding
+        class PositionalEncoding(nn.Module):
+            def __init__(self, d_m: int, max_len: int = 500):
+                super().__init__()
+                pe = torch.zeros(max_len, d_m)
+                pos = torch.arange(0, max_len).unsqueeze(1).float()
+                div = torch.exp(torch.arange(0, d_m, 2).float() * (-np.log(10000.0) / d_m))
+                pe[:, 0::2] = torch.sin(pos * div)
+                if d_m > 1:
+                    pe[:, 1::2] = torch.cos(pos * div[:d_m // 2])
+                self.register_buffer("pe", pe.unsqueeze(0))
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x + self.pe[:, :x.size(1)]
+
+        class TSTransformer(nn.Module):
+            def __init__(self, inp: int, d_m: int, nh: int, nl: int, out: int):
+                super().__init__()
+                self.input_proj = nn.Linear(inp, d_m)
+                self.pos_enc = PositionalEncoding(d_m)
+                enc_layer = nn.TransformerEncoderLayer(
+                    d_model=d_m, nhead=nh, dim_feedforward=d_m * 4,
+                    batch_first=True, dropout=0.1,
+                )
+                self.encoder = nn.TransformerEncoder(enc_layer, num_layers=nl)
+                self.fc = nn.Linear(d_m, out)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                x = self.input_proj(x)
+                x = self.pos_enc(x)
+                x = self.encoder(x)
+                return self.fc(x[:, -1, :])  # last token
+
+        torch.manual_seed(random_state)
+        model = TSTransformer(1, d_model, nhead, num_layers, n_forecast)
+        optimiser = torch.optim.Adam(model.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        model.train()
+        for ep in range(epochs):
+            optimiser.zero_grad()
+            pred = model(X_train)
+            loss = loss_fn(pred, y_train)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimiser.step()
+
+        # Evaluate
+        model.eval()
+        with torch.no_grad():
+            if len(X_test) > 0:
+                test_pred = model(X_test).numpy()
+                test_actual = y_test.numpy()
+                test_rmse = float(np.sqrt(np.mean((test_pred - test_actual) ** 2)))
+                metrics.rmse = test_rmse * sigma
+
+            # Forecast
+            last_seq = torch.FloatTensor(scaled[-lookback:]).unsqueeze(0).unsqueeze(-1)
+            forecast_scaled = model(last_seq).numpy().flatten()[:n_forecast]
+
+        forecast = forecast_scaled * sigma + mu
+        metrics.model_name = "transformer"
+        logger.info("Transformer fit: RMSE=%.4f", metrics.rmse or 0)
+
+        return ForecastResult(
+            forecasts={"target": {f"{i+1}d": float(forecast[i]) for i in range(len(forecast))}},
+            metrics=[metrics],
+        )
+
+    except Exception as exc:
+        metrics.error = f"Transformer fitting failed: {exc}"
+        logger.warning(metrics.error + " -- falling back to linear")
+        arr, fb_metrics = _fit_linear_fallback(series, n_forecast, lookback, random_state)
+        fb_metrics.model_name = "transformer_fallback"
+        return ForecastResult(metrics=[fb_metrics])
+
+
+# ---------------------------------------------------------------------------
+# C3 -- Particle Filter (Sequential Monte Carlo)
+# ---------------------------------------------------------------------------
+
+
+def fit_particle_filter(
+    series: np.ndarray,
+    n_forecast: int = 1,
+    *,
+    n_particles: int = 500,
+    process_noise: float = 0.02,
+    observation_noise: float = 0.05,
+) -> ForecastResult:
+    """Particle filter for non-linear, non-Gaussian state estimation.
+
+    Spec reference: The_Apps_core_idea.pdf Section E.2 Module 4.
+
+    Uses a swarm of particles to represent the state distribution.
+    Provides full probability distribution of future states (not
+    just mean). Handles extreme events better than Kalman.
+    """
+    metrics = ModelMetrics(model_name="particle_filter")
+
+    try:
+        clean = series[~np.isnan(series)]
+        if len(clean) < 10:
+            metrics.error = "Insufficient data for particle filter"
+            return ForecastResult(metrics=[metrics])
+
+        n = len(clean)
+
+        # Initialise particles around the first observation
+        particles = np.random.normal(clean[0], observation_noise * abs(clean[0]) + 1e-6, n_particles)
+        weights = np.ones(n_particles) / n_particles
+
+        # Run filter through observations
+        for t in range(1, n):
+            # Propagate: random walk with drift
+            if t >= 2:
+                drift = clean[t - 1] - clean[t - 2]
+            else:
+                drift = 0.0
+
+            particles = particles + drift + np.random.normal(
+                0, process_noise * abs(clean[t - 1]) + 1e-6, n_particles,
+            )
+
+            # Update weights based on observation likelihood
+            likelihoods = np.exp(
+                -0.5 * ((clean[t] - particles) / (observation_noise * abs(clean[t]) + 1e-6)) ** 2,
+            )
+            weights = weights * likelihoods
+            weight_sum = weights.sum()
+            if weight_sum > 0:
+                weights /= weight_sum
+            else:
+                weights = np.ones(n_particles) / n_particles
+
+            # Resample (systematic resampling) when effective sample size drops
+            n_eff = 1.0 / np.sum(weights ** 2)
+            if n_eff < n_particles / 2:
+                indices = _systematic_resample(weights)
+                particles = particles[indices]
+                weights = np.ones(n_particles) / n_particles
+
+        # Forecast: propagate particles forward
+        forecasts = np.zeros(n_forecast)
+        current_particles = particles.copy()
+        last_drift = clean[-1] - clean[-2] if len(clean) >= 2 else 0.0
+
+        for step in range(n_forecast):
+            current_particles = current_particles + last_drift + np.random.normal(
+                0, process_noise * abs(clean[-1]) + 1e-6, n_particles,
+            )
+            forecasts[step] = np.average(current_particles, weights=weights)
+
+        # Compute RMSE on last 20% as validation
+        val_start = max(1, int(n * 0.8))
+        val_errors = []
+        pf_state = clean[val_start - 1]
+        for t in range(val_start, n):
+            drift_t = clean[t - 1] - clean[t - 2] if t >= 2 else 0.0
+            pred_t = pf_state + drift_t
+            val_errors.append((pred_t - clean[t]) ** 2)
+            pf_state = clean[t]
+        if val_errors:
+            metrics.rmse = float(np.sqrt(np.mean(val_errors)))
+
+        logger.info("Particle filter fit: RMSE=%.4f, n_particles=%d", metrics.rmse or 0, n_particles)
+
+        return ForecastResult(
+            forecasts={"target": {f"{i+1}d": float(forecasts[i]) for i in range(n_forecast)}},
+            metrics=[metrics],
+        )
+
+    except Exception as exc:
+        metrics.error = f"Particle filter failed: {exc}"
+        logger.warning(metrics.error)
+        return ForecastResult(metrics=[metrics])
+
+
+def _systematic_resample(weights: np.ndarray) -> np.ndarray:
+    """Systematic resampling for particle filter."""
+    n = len(weights)
+    positions = (np.arange(n) + np.random.random()) / n
+    cumsum = np.cumsum(weights)
+    indices = np.searchsorted(cumsum, positions)
+    return np.clip(indices, 0, n - 1)
+
+
 def _fit_linear_fallback(
     series: np.ndarray,
     n_forecast: int,
