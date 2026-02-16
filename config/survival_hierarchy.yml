@@ -1,0 +1,84 @@
+# Survival hierarchy tier definitions and weight presets.
+#
+# Five tiers ordered by importance during crisis (per spec):
+#   tier1: Liquidity & Cash (highest priority in survival)
+#   tier2: Debt & Solvency
+#   tier3: Market Stability
+#   tier4: Profitability (lower priority in survival)
+#   tier5: Growth & Valuation (lowest priority in survival)
+
+tiers:
+  tier1:
+    label: "Liquidity & Cash"
+    variables:
+      - cash_and_equivalents_asof
+      - cash_ratio
+      - free_cash_flow_ttm
+      - operating_cash_flow_asof
+  tier2:
+    label: "Debt & Solvency"
+    variables:
+      - total_debt_asof
+      - debt_to_equity
+      - net_debt_to_ebitda
+      - interest_coverage
+      - current_ratio
+  tier3:
+    label: "Market Stability"
+    variables:
+      - volatility_21d
+      - drawdown_252d
+      - volume
+  tier4:
+    label: "Profitability"
+    variables:
+      - gross_margin
+      - operating_margin
+      - net_margin
+  tier5:
+    label: "Growth & Valuation"
+    variables:
+      - revenue_asof
+      - pe_ratio
+      - ev_to_ebitda
+
+# Weight presets per regime.
+# Weights are tier1 through tier5 and must sum to 1.0.
+#
+# Source: The_Apps_core_idea.pdf Section C.3-C.4.
+#
+# Case 1 -- Normal Company, Normal Country:
+#   Standard equal weights.
+# Case 2 -- Survival Company, Normal Country:
+#   Company in distress, environment stable. Focus: liquidity management.
+# Case 3 -- Normal Company, Survival Country (NOT protected):
+#   Company healthy but environment toxic. Focus: defensive positioning.
+# Case 3b -- Normal Company, Survival Country (protected):
+#   Uses standard weights (company is shielded by government).
+#   Handled in code: regime selector returns "normal" when protected.
+# Case 4 -- Survival Company, Survival Country:
+#   Both in crisis. Focus: immediate survival only.
+regimes:
+  normal:
+    weights: [0.20, 0.20, 0.20, 0.20, 0.20]
+  company_survival:
+    weights: [0.50, 0.30, 0.15, 0.04, 0.01]
+  modified_survival:
+    # Country crisis, company healthy, NOT protected.
+    weights: [0.40, 0.35, 0.20, 0.04, 0.01]
+  extreme_survival:
+    # Both company and country in crisis.
+    weights: [0.60, 0.30, 0.10, 0.00, 0.00]
+
+# Vanity-adjusted deltas.
+# When vanity_percentage exceeds the threshold AND the company is in a
+# survival regime, shift weight from Tier 4 and Tier 5 toward Tier 1.
+#
+# Source: The_Apps_core_idea.pdf Section C.6 --
+#   "move 2% from Tier 4 and 3% from Tier 5 to Tier 1"
+#   New weights become: 55/30/15/2/0 (even more emphasis on liquidity)
+vanity_adjustment:
+  threshold: 10.0              # vanity_percentage above which deltas apply
+  tier1_delta: 0.05            # add to tier1 (liquidity)
+  tier4_delta: -0.02           # subtract from tier4 (profitability)
+  tier5_delta: -0.03           # subtract from tier5 (growth/valuation)

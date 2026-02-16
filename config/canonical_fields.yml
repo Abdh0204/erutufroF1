@@ -1,0 +1,539 @@
+# Canonical field dictionary for Operator 1.
+#
+# Maps every variable used in the pipeline to its metadata:
+#   - category: "decision" (internal) or "linked" (external)
+#   - source: endpoint or module that produces it
+#   - mode: "direct" (from API) or "derived" (computed from other fields)
+#   - formula: computation formula (if derived)
+#   - tier: survival hierarchy tier (1-5) if applicable
+#
+# Reference: The_Apps_coding_instructions.pdf Section 3.2
+
+# ===========================================================================
+# Identity (Profile -- direct)
+# ===========================================================================
+isin:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+ticker:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+exchange:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+currency:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+country:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+sector:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+industry:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+sub_industry:
+  category: decision
+  source: eulerpool_profile
+  mode: direct
+  tier: null
+
+# ===========================================================================
+# Market data (Quotes / FMP -- direct, daily)
+# ===========================================================================
+open:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+high:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+low:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+close:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+volume:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: 3
+
+adjusted_close:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+market_cap:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+shares_outstanding:
+  category: decision
+  source: fmp_ohlcv
+  mode: direct
+  tier: null
+
+# ===========================================================================
+# Statement line items (Eulerpool -- direct, periodic -> as-of aligned)
+# ===========================================================================
+revenue_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: 5
+
+gross_profit_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: null
+
+ebit_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: null
+
+ebitda_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: null
+
+net_income_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: null
+
+interest_expense_asof:
+  category: decision
+  source: eulerpool_income_statement
+  mode: direct
+  tier: null
+
+total_assets_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+total_liabilities_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+total_equity_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+current_assets_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+current_liabilities_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+cash_and_equivalents_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: 1
+
+short_term_debt_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+long_term_debt_asof:
+  category: decision
+  source: eulerpool_balance_sheet
+  mode: direct
+  tier: null
+
+operating_cash_flow_asof:
+  category: decision
+  source: eulerpool_cashflow_statement
+  mode: direct
+  tier: 1
+
+capex_asof:
+  category: decision
+  source: eulerpool_cashflow_statement
+  mode: direct
+  tier: null
+
+# ===========================================================================
+# Derived decision variables (computed daily)
+# ===========================================================================
+
+# -- Returns & risk (Tier 3 / no tier) --
+return_1d:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "close[t] / close[t-1] - 1"
+  tier: null
+
+log_return_1d:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "ln(close[t] / close[t-1])"
+  tier: null
+
+volatility_21d:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "stddev(log_return_1d, 21)"
+  tier: 3
+
+drawdown_252d:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "close / rolling_max(close, 252) - 1"
+  tier: 3
+
+# -- Capital structure / solvency (Tier 2) --
+total_debt_asof:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "short_term_debt_asof + long_term_debt_asof"
+  tier: 2
+
+debt_to_equity:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "total_debt_asof / total_equity_asof"
+  tier: 2
+
+net_debt:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "total_debt_asof - cash_and_equivalents_asof"
+  tier: null
+
+net_debt_to_ebitda:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "net_debt / ebitda_ttm_asof"
+  tier: 2
+
+interest_coverage:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "ebit_ttm_asof / interest_expense_ttm_asof"
+  tier: 2
+
+# -- Liquidity / survival (Tier 1 and 2) --
+current_ratio:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "current_assets_asof / current_liabilities_asof"
+  tier: 2
+
+quick_ratio:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "(cash + receivables + short_term_investments) / current_liabilities"
+  tier: null
+
+cash_ratio:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "cash_and_equivalents_asof / current_liabilities_asof"
+  tier: 1
+
+# -- Cash reality (Tier 1) --
+free_cash_flow:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "operating_cash_flow_asof - capex_asof"
+  tier: null
+
+free_cash_flow_ttm:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "sum(last 4 quarters free_cash_flow, point-in-time)"
+  tier: 1
+
+fcf_yield:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "free_cash_flow_ttm_asof / market_cap[t]"
+  tier: null
+
+fcf_margin:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "free_cash_flow_ttm_asof / revenue_ttm_asof"
+  tier: null
+
+# -- Profitability (Tier 4) --
+gross_margin:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "gross_profit_ttm_asof / revenue_ttm_asof"
+  tier: 4
+
+operating_margin:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "ebit_ttm_asof / revenue_ttm_asof"
+  tier: 4
+
+net_margin:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "net_income_ttm_asof / revenue_ttm_asof"
+  tier: 4
+
+roe:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "net_income_ttm_asof / avg_equity_asof"
+  tier: null
+
+# -- Valuation (Tier 5) --
+pe_ratio:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "market_cap[t] / net_income_ttm_asof"
+  tier: 5
+
+earnings_yield:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "net_income_ttm_asof / market_cap[t]"
+  tier: null
+
+ps_ratio:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "market_cap[t] / revenue_ttm_asof"
+  tier: null
+
+enterprise_value:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "market_cap[t] + total_debt_asof - cash_and_equivalents_asof"
+  tier: null
+
+ev_to_ebitda:
+  category: decision
+  source: derived
+  mode: derived
+  formula: "enterprise_value / ebitda_ttm_asof"
+  tier: 5
+
+# ===========================================================================
+# Linked variables (external -- computed from peer/relationship sets)
+# ===========================================================================
+sector_median_return_21d:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "median(return_21d) over sector peer set"
+  tier: null
+
+sector_median_vol_21d:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "median(volatility_21d) over sector peer set"
+  tier: null
+
+rel_strength_vs_sector:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "return_21d_company - sector_median_return_21d"
+  tier: null
+
+industry_median_debt_to_equity:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "median(debt_to_equity) over industry peer set"
+  tier: null
+
+industry_median_fcf_yield:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "median(fcf_yield) over industry peer set"
+  tier: null
+
+valuation_premium_vs_industry:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "pe_ratio_calc - industry_median_pe"
+  tier: null
+
+competitors_avg_return_21d:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "mean(return_21d) over competitors set"
+  tier: null
+
+supply_chain_avg_drawdown_252d:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "mean(drawdown_252d) over supply chain set"
+  tier: null
+
+# ===========================================================================
+# Macro variables (World Bank -- linked, country-level)
+# ===========================================================================
+inflation_rate_yoy:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+cpi_index:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+unemployment_rate:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+gdp_growth:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+gdp_current_usd:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+official_exchange_rate_lcu_per_usd:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+current_account_balance_pct_gdp:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+reserves_months_of_imports:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+real_interest_rate:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+lending_interest_rate:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+deposit_interest_rate:
+  category: linked
+  source: world_bank
+  mode: direct
+  tier: null
+
+# Derived macro
+inflation_rate_daily_equivalent:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "(1 + inflation_rate_yoy/100)^(1/252) - 1"
+  tier: null
+
+real_return_1d:
+  category: linked
+  source: derived
+  mode: derived
+  formula: "nominal_return_1d - inflation_rate_daily_equivalent"
+  tier: null

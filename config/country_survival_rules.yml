@@ -1,0 +1,66 @@
+# Country survival mode detection rules.
+#
+# Defines how to compute country_survival_mode_flag from macro indicators.
+# These thresholds are loaded by operator1/analysis/survival_mode.py
+# and applied daily (or as-of aligned) to the macro cache.
+#
+# Reference: The_Apps_core_idea.pdf Section C.1, Coding Instructions Section 6.2
+
+# A country enters survival mode when ANY of these triggers fire.
+triggers:
+  # Credit market frozen -- banking stress
+  credit_spread:
+    variable: credit_spread
+    operator: ">"
+    threshold: 5.0            # percent
+
+  # Rapid unemployment surge -- recession signal
+  unemployment_surge:
+    variable: unemployment_rate
+    operator: "delta_gt"      # 6-month increase > threshold
+    threshold: 3.0            # percentage points
+    lookback_days: 126        # ~6 months of trading days
+
+  # Severe yield curve inversion -- economic distress
+  yield_curve_inversion:
+    variable: yield_curve_slope
+    operator: "<"
+    threshold: -0.5           # percent
+
+  # Currency crisis -- FX volatility extreme
+  fx_crisis:
+    variable: fx_volatility
+    operator: ">"
+    threshold: 20.0           # annualised percent
+
+  # Government policy rate at extreme levels
+  # (optional -- World Bank may not provide daily rate data)
+  extreme_policy_rate:
+    variable: policy_rate
+    operator: ">"
+    threshold: 15.0           # percent (emergency levels)
+    required: false           # do not fail if variable is missing
+
+# Additional proxy-based triggers from World Bank macro data.
+# These are lower-frequency and act as supplementary signals.
+proxy_triggers:
+  # Inflation spike (annual, from World Bank)
+  inflation_crisis:
+    variable: inflation_rate_yoy
+    operator: ">"
+    threshold: 15.0           # annual CPI inflation > 15%
+    required: false
+
+  # FX reserves depleted
+  reserves_depleted:
+    variable: reserves_months_of_imports
+    operator: "<"
+    threshold: 3.0            # less than 3 months of import cover
+    required: false
+
+  # Current account deterioration
+  current_account_crisis:
+    variable: current_account_balance_pct_gdp
+    operator: "<"
+    threshold: -8.0           # severe deficit
+    required: false

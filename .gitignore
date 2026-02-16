@@ -1,2 +1,9 @@
-node_modules/
+**/__pycache__/
+.pytest_cache/
+*.pyc
+
+# Secrets (never commit)
 .env
+
+# Cache artifacts
+cache/

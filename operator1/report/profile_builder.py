@@ -1,0 +1,695 @@
+"""T7.1 -- Profile JSON builder.
+
+Aggregates all pipeline outputs into a single ``company_profile.json``
+that feeds report generation (T7.2) and the Gemini narrative (Sec 18).
+
+Sections included:
+
+1. **Target identity** -- verified ISIN, ticker, country, sector, etc.
+2. **Survival flags** -- company, country, and protection flags (latest).
+3. **Linked entity aggregates** -- summary stats per relationship group.
+4. **Temporal results** -- regime labels, structural breaks, predictions,
+   model metrics.
+5. **Vanity percentage** -- latest and summary statistics.
+6. **Monte Carlo** -- survival probability mean/p5/p95.
+7. **Data quality** -- coverage percentages, failed modules.
+8. **Estimation coverage** -- per-variable observed vs estimated stats.
+
+Top-level entry point:
+    ``build_company_profile(...)`` -> dict (also persisted as JSON).
+
+Spec refs: Sec 18
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from operator1.constants import CACHE_DIR, DATE_START, DATE_END
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _safe_float(val: Any) -> float | None:
+    """Convert a value to a JSON-safe float (None for NaN/Inf)."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_str(val: Any) -> str | None:
+    """Convert a value to a JSON-safe string (None for NaN/None)."""
+    if val is None:
+        return None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+    return str(val)
+
+
+def _latest_row(df: pd.DataFrame) -> pd.Series | None:
+    """Return the last row of a DataFrame, or None if empty."""
+    if df is None or df.empty:
+        return None
+    return df.iloc[-1]
+
+
+def _series_summary(s: pd.Series) -> dict[str, Any]:
+    """Compute basic summary stats for a numeric Series."""
+    if s is None or s.empty or s.isna().all():
+        return {
+            "mean": None,
+            "median": None,
+            "min": None,
+            "max": None,
+            "latest": None,
+            "n_observed": 0,
+            "n_missing": 0,
+        }
+    return {
+        "mean": _safe_float(s.mean()),
+        "median": _safe_float(s.median()),
+        "min": _safe_float(s.min()),
+        "max": _safe_float(s.max()),
+        "latest": _safe_float(s.iloc[-1]),
+        "n_observed": int(s.notna().sum()),
+        "n_missing": int(s.isna().sum()),
+    }
+
+
+def _json_serialisable(obj: Any) -> Any:
+    """Recursively convert numpy/pandas types for JSON serialisation."""
+    if isinstance(obj, dict):
+        return {k: _json_serialisable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_serialisable(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return _safe_float(obj)
+    if isinstance(obj, np.ndarray):
+        return _json_serialisable(obj.tolist())
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Section builders
+# ---------------------------------------------------------------------------
+
+
+def _build_identity_section(
+    verified_target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the target identity section from VerifiedTarget data.
+
+    Accepts either a VerifiedTarget dataclass (converted to dict) or
+    a plain dict.
+    """
+    if not verified_target:
+        return {"available": False}
+
+    # Accept dataclass instances via asdict
+    if hasattr(verified_target, "__dataclass_fields__"):
+        verified_target = asdict(verified_target)  # type: ignore[arg-type]
+
+    return {
+        "available": True,
+        "isin": verified_target.get("isin"),
+        "ticker": verified_target.get("ticker"),
+        "name": verified_target.get("name"),
+        "country": verified_target.get("country"),
+        "sector": verified_target.get("sector"),
+        "industry": verified_target.get("industry"),
+        "sub_industry": verified_target.get("sub_industry"),
+        "fmp_symbol": verified_target.get("fmp_symbol"),
+        "currency": verified_target.get("currency"),
+        "exchange": verified_target.get("exchange"),
+    }
+
+
+def _build_survival_section(cache: pd.DataFrame | None) -> dict[str, Any]:
+    """Extract latest survival flags and regime from the cache."""
+    if cache is None or cache.empty:
+        return {"available": False}
+
+    latest = _latest_row(cache)
+    if latest is None:
+        return {"available": False}
+
+    # Regime distribution over the entire window
+    regime_col = "survival_regime"
+    regime_dist: dict[str, Any] = {}
+    if regime_col in cache.columns:
+        vc = cache[regime_col].value_counts(normalize=True)
+        regime_dist = {str(k): round(float(v), 4) for k, v in vc.items()}
+
+    return {
+        "available": True,
+        "company_survival_mode_flag": int(latest.get("company_survival_mode_flag", 0)),
+        "country_survival_mode_flag": int(latest.get("country_survival_mode_flag", 0)),
+        "country_protected_flag": int(latest.get("country_protected_flag", 0)),
+        "survival_regime": _safe_str(latest.get("survival_regime")),
+        "regime_distribution_pct": regime_dist,
+        "hierarchy_weights": {
+            f"tier{i}": _safe_float(latest.get(f"hierarchy_tier{i}_weight"))
+            for i in range(1, 6)
+        },
+    }
+
+
+def _build_vanity_section(cache: pd.DataFrame | None) -> dict[str, Any]:
+    """Summarise vanity percentage from the cache."""
+    if cache is None or cache.empty or "vanity_percentage" not in cache.columns:
+        return {"available": False}
+
+    return {
+        "available": True,
+        **_series_summary(cache["vanity_percentage"]),
+    }
+
+
+def _build_linked_section(
+    linked_aggregates: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Summarise linked entity aggregates by relationship group."""
+    if linked_aggregates is None or linked_aggregates.empty:
+        return {"available": False, "groups": {}}
+
+    groups: dict[str, dict[str, Any]] = {}
+
+    # Detect group columns by naming convention: {group}_avg_{var} etc.
+    group_prefixes = set()
+    for col in linked_aggregates.columns:
+        parts = col.split("_")
+        if len(parts) >= 3 and parts[-2] in ("avg", "median"):
+            group_prefixes.add("_".join(parts[:-2]))
+
+    for prefix in sorted(group_prefixes):
+        group_info: dict[str, Any] = {}
+        for col in linked_aggregates.columns:
+            if col.startswith(prefix + "_"):
+                suffix = col[len(prefix) + 1 :]
+                group_info[suffix] = _series_summary(linked_aggregates[col])
+        if group_info:
+            groups[prefix] = group_info
+
+    return {
+        "available": bool(groups),
+        "n_groups": len(groups),
+        "groups": groups,
+    }
+
+
+def _build_regime_section(
+    cache: pd.DataFrame | None,
+    regime_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarise regime detection outputs."""
+    if cache is None or cache.empty:
+        return {"available": False}
+
+    section: dict[str, Any] = {"available": True}
+
+    # Current regime from cache
+    if "regime_label" in cache.columns:
+        latest = cache["regime_label"].iloc[-1]
+        section["current_regime"] = _safe_str(latest)
+        vc = cache["regime_label"].value_counts(normalize=True)
+        section["regime_distribution_pct"] = {
+            str(k): round(float(v), 4) for k, v in vc.items()
+        }
+    else:
+        section["current_regime"] = None
+        section["regime_distribution_pct"] = {}
+
+    # Structural breaks
+    if "structural_break" in cache.columns:
+        break_days = cache.index[cache["structural_break"] == 1].tolist()
+        section["n_structural_breaks"] = len(break_days)
+        section["structural_break_dates"] = [
+            str(d) for d in break_days[-10:]  # last 10
+        ]
+    else:
+        section["n_structural_breaks"] = 0
+        section["structural_break_dates"] = []
+
+    # Model status flags from regime result
+    if regime_result:
+        section["hmm_fitted"] = regime_result.get("hmm_fitted", False)
+        section["gmm_fitted"] = regime_result.get("gmm_fitted", False)
+        section["pelt_fitted"] = regime_result.get("pelt_fitted", False)
+        section["bcp_fitted"] = regime_result.get("bcp_fitted", False)
+
+    return section
+
+
+def _build_predictions_section(
+    prediction_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Format prediction aggregation results for the profile."""
+    if not prediction_result:
+        return {"available": False}
+
+    section: dict[str, Any] = {"available": True}
+
+    # Extract flat prediction summaries per horizon
+    predictions = prediction_result.get("predictions", {})
+    horizon_summaries: dict[str, list[dict[str, Any]]] = {}
+
+    for var_name, horizons in predictions.items():
+        for h_label, pred in horizons.items():
+            if h_label not in horizon_summaries:
+                horizon_summaries[h_label] = []
+
+            if isinstance(pred, dict):
+                entry = {
+                    "variable": var_name,
+                    "point_forecast": _safe_float(pred.get("point_forecast")),
+                    "lower_ci": _safe_float(pred.get("lower_ci")),
+                    "upper_ci": _safe_float(pred.get("upper_ci")),
+                    "confidence": _safe_float(pred.get("confidence")),
+                }
+            else:
+                # Might be a dataclass
+                entry = {
+                    "variable": var_name,
+                    "point_forecast": _safe_float(
+                        getattr(pred, "point_forecast", None),
+                    ),
+                    "lower_ci": _safe_float(
+                        getattr(pred, "lower_ci", None),
+                    ),
+                    "upper_ci": _safe_float(
+                        getattr(pred, "upper_ci", None),
+                    ),
+                    "confidence": _safe_float(
+                        getattr(pred, "confidence", None),
+                    ),
+                }
+            horizon_summaries[h_label].append(entry)
+
+    section["horizons"] = horizon_summaries
+
+    # Technical Alpha
+    ta = prediction_result.get("technical_alpha")
+    if ta:
+        if isinstance(ta, dict):
+            section["technical_alpha"] = {
+                "next_day_low": _safe_float(ta.get("next_day_low")),
+                "mask_applied": ta.get("mask_applied", True),
+            }
+        else:
+            section["technical_alpha"] = {
+                "next_day_low": _safe_float(
+                    getattr(ta, "next_day_low", None),
+                ),
+                "mask_applied": getattr(ta, "mask_applied", True),
+            }
+
+    # Ensemble weights
+    section["ensemble_weights"] = prediction_result.get(
+        "ensemble_weights", {},
+    )
+    section["n_models_available"] = prediction_result.get(
+        "n_models_available", 0,
+    )
+    section["n_models_failed"] = prediction_result.get(
+        "n_models_failed", 0,
+    )
+
+    return section
+
+
+def _build_monte_carlo_section(
+    mc_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Format Monte Carlo simulation results."""
+    if not mc_result:
+        return {"available": False}
+
+    return {
+        "available": True,
+        "survival_probability_mean": _safe_float(
+            mc_result.get("survival_probability_mean"),
+        ),
+        "survival_probability_p5": _safe_float(
+            mc_result.get("survival_probability_p5"),
+        ),
+        "survival_probability_p95": _safe_float(
+            mc_result.get("survival_probability_p95"),
+        ),
+        "n_paths": mc_result.get("n_paths", 0),
+        "importance_sampling_used": mc_result.get(
+            "importance_sampling_used", False,
+        ),
+        "current_regime": _safe_str(mc_result.get("current_regime")),
+        "survival_by_horizon": {
+            k: _safe_float(v)
+            for k, v in mc_result.get("survival_probability", {}).items()
+        },
+    }
+
+
+def _build_model_metrics_section(
+    forecast_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Summarise model metrics from forecasting results."""
+    if not forecast_result:
+        return {"available": False}
+
+    metrics = forecast_result.get("metrics", [])
+    model_status: dict[str, Any] = {}
+
+    # Collect model failure flags
+    for key in (
+        "model_failed_kalman",
+        "model_failed_garch",
+        "model_failed_var",
+        "model_failed_lstm",
+        "model_failed_tree",
+    ):
+        val = forecast_result.get(key)
+        if val is not None:
+            model_status[key] = bool(val)
+
+    # Summarise per-model best RMSE
+    model_best_rmse: dict[str, float | None] = {}
+    for m in metrics:
+        if isinstance(m, dict):
+            name = m.get("model_name", "")
+            fitted = m.get("fitted", False)
+            rmse = m.get("rmse", float("nan"))
+        else:
+            name = getattr(m, "model_name", "")
+            fitted = getattr(m, "fitted", False)
+            rmse = getattr(m, "rmse", float("nan"))
+
+        if fitted and name:
+            rmse_val = _safe_float(rmse)
+            if rmse_val is not None:
+                if name not in model_best_rmse or (
+                    model_best_rmse[name] is not None
+                    and rmse_val < model_best_rmse[name]
+                ):
+                    model_best_rmse[name] = rmse_val
+
+    return {
+        "available": True,
+        "model_status": model_status,
+        "model_best_rmse": model_best_rmse,
+        "model_used": forecast_result.get("model_used", {}),
+    }
+
+
+def _build_data_quality_section(
+    quality_report_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load data quality report from disk if available."""
+    if quality_report_path is None:
+        quality_report_path = Path(CACHE_DIR) / "data_quality_report.json"
+
+    path = Path(quality_report_path)
+    if not path.exists():
+        return {"available": False}
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            report = json.load(fh)
+        return {"available": True, **report}
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load data quality report: %s", exc)
+        return {"available": False, "error": str(exc)}
+
+
+def _build_estimation_section(
+    estimation_coverage_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load estimation coverage stats from disk if available."""
+    if estimation_coverage_path is None:
+        estimation_coverage_path = (
+            Path(CACHE_DIR) / "estimation_coverage.json"
+        )
+
+    path = Path(estimation_coverage_path)
+    if not path.exists():
+        return {"available": False}
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            coverage = json.load(fh)
+        return {"available": True, **coverage}
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load estimation coverage: %s", exc)
+        return {"available": False, "error": str(exc)}
+
+
+def _build_ethical_filters_section(
+    cache: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Run the four ethical filters and return the combined result."""
+    if cache is None or cache.empty:
+        return {
+            "available": False,
+            "purchasing_power": {"available": False, "verdict": "UNAVAILABLE"},
+            "solvency": {"available": False, "verdict": "UNAVAILABLE"},
+            "gharar": {"available": False, "verdict": "UNAVAILABLE"},
+            "cash_is_king": {"available": False, "verdict": "UNAVAILABLE"},
+        }
+    try:
+        from operator1.analysis.ethical_filters import compute_all_ethical_filters
+        result = compute_all_ethical_filters(cache)
+        result["available"] = True
+        return result
+    except Exception as exc:
+        logger.warning("Ethical filter computation failed: %s", exc)
+        return {
+            "available": False,
+            "error": str(exc),
+            "purchasing_power": {"available": False, "verdict": "UNAVAILABLE"},
+            "solvency": {"available": False, "verdict": "UNAVAILABLE"},
+            "gharar": {"available": False, "verdict": "UNAVAILABLE"},
+            "cash_is_king": {"available": False, "verdict": "UNAVAILABLE"},
+        }
+
+
+def _build_failed_modules_section(
+    *,
+    regime_result: dict[str, Any] | None = None,
+    forecast_result: dict[str, Any] | None = None,
+    mc_result: dict[str, Any] | None = None,
+    prediction_result: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Compile a list of failed modules with mitigations applied."""
+    failed: list[dict[str, str]] = []
+
+    # Check regime detection
+    if regime_result:
+        for method, key in [
+            ("HMM", "hmm_fitted"),
+            ("GMM", "gmm_fitted"),
+            ("PELT", "pelt_fitted"),
+            ("BCP", "bcp_fitted"),
+        ]:
+            if not regime_result.get(key, False):
+                error = regime_result.get(f"{key.split('_')[0]}_error", "")
+                failed.append({
+                    "module": f"Regime detection ({method})",
+                    "error": error or "not fitted",
+                    "mitigation": (
+                        "Regime labels derived from available methods; "
+                        "fallback to single-regime if all fail."
+                    ),
+                })
+
+    # Check forecasting models
+    if forecast_result:
+        model_names = {
+            "kalman": "Kalman filter",
+            "garch": "GARCH",
+            "var": "VAR",
+            "lstm": "LSTM",
+            "tree": "RF/GBM/XGB",
+        }
+        for key, name in model_names.items():
+            if forecast_result.get(f"model_failed_{key}", False):
+                error = forecast_result.get(f"{key}_error", "")
+                failed.append({
+                    "module": f"Forecasting ({name})",
+                    "error": error or "model failed",
+                    "mitigation": (
+                        "Forecasts produced by next model in fallback "
+                        "chain; baseline (last-value/EMA) always succeeds."
+                    ),
+                })
+
+    # Check Monte Carlo
+    if mc_result:
+        mc_error = mc_result.get("error")
+        if mc_error:
+            failed.append({
+                "module": "Monte Carlo simulation",
+                "error": mc_error,
+                "mitigation": "Survival probability set to NaN; uncertainty bands not adjusted.",
+            })
+
+    # Check prediction aggregation
+    if prediction_result:
+        pred_error = prediction_result.get("error")
+        if pred_error:
+            failed.append({
+                "module": "Prediction aggregation",
+                "error": pred_error,
+                "mitigation": "Predictions unavailable; report limited to historical analysis.",
+            })
+
+    return failed
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def build_company_profile(
+    *,
+    verified_target: dict[str, Any] | None = None,
+    cache: pd.DataFrame | None = None,
+    linked_aggregates: pd.DataFrame | None = None,
+    regime_result: dict[str, Any] | None = None,
+    forecast_result: dict[str, Any] | None = None,
+    mc_result: dict[str, Any] | None = None,
+    prediction_result: dict[str, Any] | None = None,
+    quality_report_path: str | Path | None = None,
+    estimation_coverage_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Build the comprehensive company profile JSON.
+
+    All parameters are optional -- missing sections are included with
+    ``"available": False`` so the report generator can note gaps.
+
+    Parameters
+    ----------
+    verified_target:
+        Dict (or VerifiedTarget dataclass) from T2.1.
+    cache:
+        Full feature table (target daily cache with all derived
+        variables, survival flags, regime labels, etc.).
+    linked_aggregates:
+        Linked entity aggregate DataFrame from T3.4.
+    regime_result:
+        Dict (or RegimeResult dataclass) from T6.1.
+    forecast_result:
+        Dict (or ForecastResult dataclass) from T6.2.
+    mc_result:
+        Dict (or MonteCarloResult dataclass) from T6.3.
+    prediction_result:
+        Dict (or PredictionAggregatorResult dataclass) from T6.4.
+    quality_report_path:
+        Path to ``data_quality_report.json`` (default: ``cache/``).
+    estimation_coverage_path:
+        Path to ``estimation_coverage.json`` (default: ``cache/``).
+    output_path:
+        Where to write ``company_profile.json``.  Defaults to
+        ``cache/company_profile.json``.
+
+    Returns
+    -------
+    dict
+        The complete company profile as a Python dict.
+        Also persisted to *output_path* as JSON.
+    """
+    logger.info("Building company profile JSON...")
+
+    # Convert dataclass results to dicts if needed
+    for name, obj in [
+        ("regime_result", regime_result),
+        ("forecast_result", forecast_result),
+        ("mc_result", mc_result),
+        ("prediction_result", prediction_result),
+    ]:
+        if obj is not None and hasattr(obj, "__dataclass_fields__"):
+            try:
+                converted = asdict(obj)
+            except Exception:
+                converted = obj.__dict__.copy() if hasattr(obj, "__dict__") else {}
+            if name == "regime_result":
+                regime_result = converted
+            elif name == "forecast_result":
+                forecast_result = converted
+            elif name == "mc_result":
+                mc_result = converted
+            elif name == "prediction_result":
+                prediction_result = converted
+
+    # Assemble profile
+    profile: dict[str, Any] = {
+        "meta": {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "pipeline_version": "1.0.0",
+            "date_range": {
+                "start": DATE_START.isoformat(),
+                "end": DATE_END.isoformat(),
+            },
+        },
+        "identity": _build_identity_section(verified_target),
+        "survival": _build_survival_section(cache),
+        "vanity": _build_vanity_section(cache),
+        "linked_entities": _build_linked_section(linked_aggregates),
+        "regimes": _build_regime_section(cache, regime_result),
+        "predictions": _build_predictions_section(prediction_result),
+        "monte_carlo": _build_monte_carlo_section(mc_result),
+        "model_metrics": _build_model_metrics_section(forecast_result),
+        "filters": _build_ethical_filters_section(cache),
+        "data_quality": _build_data_quality_section(quality_report_path),
+        "estimation": _build_estimation_section(estimation_coverage_path),
+        "failed_modules": _build_failed_modules_section(
+            regime_result=regime_result,
+            forecast_result=forecast_result,
+            mc_result=mc_result,
+            prediction_result=prediction_result,
+        ),
+    }
+
+    # Make JSON-safe
+    profile = _json_serialisable(profile)
+
+    # Persist to disk
+    if output_path is None:
+        output_path = Path(CACHE_DIR) / "company_profile.json"
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(profile, fh, indent=2, default=str)
+
+    logger.info("Company profile written to %s", out)
+    return profile

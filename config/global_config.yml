@@ -1,0 +1,20 @@
+# Global pipeline configuration for Operator 1.
+
+# HTTP request settings
+timeout_s: 30
+max_retries: 3
+backoff_factor: 2.0        # exponential backoff multiplier
+
+# Disk cache TTL for HTTP responses (hours)
+http_cache_ttl_hours: 24
+
+# Entity discovery budgets
+search_budget_per_group: 10   # max Eulerpool search calls per relationship group
+search_budget_global: 50      # max total Eulerpool search calls
+
+# Cache rebuild control
+# Set to true to force re-fetching all data even when caches exist.
+FORCE_REBUILD: false
+
+# Logging
+log_level: INFO
