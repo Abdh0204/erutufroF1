@@ -1853,13 +1853,23 @@ class VARWrapper(BaseModelWrapper):
 
 
 class LSTMWrapper(BaseModelWrapper):
-    """LSTM wrapper with single-step gradient updates.
+    """LSTM wrapper with single-step gradient updates and MC Dropout.
 
     Performs a single-epoch, single-sample gradient descent step on
     each new observation for online learning.
+
+    **MC Dropout (G2):** By enabling dropout at inference time and
+    running multiple forward passes, we can estimate *epistemic
+    uncertainty* (model's own confidence about its prediction).
+    This separates "the model doesn't know" from "inherent randomness",
+    giving Gemini better language for the risk section.
     """
 
     name = "lstm"
+
+    # MC Dropout settings
+    _MC_DROPOUT_RATE: float = 0.1
+    _MC_FORWARD_PASSES: int = 100
 
     def __init__(
         self,
@@ -1868,6 +1878,7 @@ class LSTMWrapper(BaseModelWrapper):
         hidden_size: int = _LSTM_HIDDEN,
         lookback: int = _LSTM_LOOKBACK,
         lr: float = _LSTM_LR,
+        dropout_rate: float = 0.1,
     ) -> None:
         self._lookback = lookback
         self._lr = lr
@@ -1879,6 +1890,8 @@ class LSTMWrapper(BaseModelWrapper):
         self._scaler_std = 1.0
         self._history: list[float] = []
         self._last_pred = 0.0
+        self._last_epistemic_std = 0.0  # MC Dropout uncertainty
+        self._dropout_rate = dropout_rate
 
         clean = series[~np.isnan(series)]
         if len(clean) < _MIN_OBS_LSTM:
@@ -1893,16 +1906,20 @@ class LSTMWrapper(BaseModelWrapper):
             import torch.nn as nn
 
             class _MiniLSTM(nn.Module):
-                def __init__(self, hidden: int) -> None:
+                """LSTM with dropout for MC Dropout uncertainty."""
+
+                def __init__(self, hidden: int, dropout: float = 0.1) -> None:
                     super().__init__()
-                    self.lstm = nn.LSTM(1, hidden, batch_first=True)
+                    self.lstm = nn.LSTM(1, hidden, batch_first=True, dropout=dropout if hidden > 1 else 0)
+                    self.dropout = nn.Dropout(p=dropout)
                     self.fc = nn.Linear(hidden, 1)
 
                 def forward(self, x: Any) -> Any:
                     out, _ = self.lstm(x)
-                    return self.fc(out[:, -1, :])
+                    out = self.dropout(out[:, -1, :])  # Dropout before FC
+                    return self.fc(out)
 
-            self._model = _MiniLSTM(hidden_size)
+            self._model = _MiniLSTM(hidden_size, dropout_rate)
             self._optimizer = torch.optim.Adam(self._model.parameters(), lr=lr)
             self._criterion = nn.MSELoss()
 
@@ -1933,18 +1950,24 @@ class LSTMWrapper(BaseModelWrapper):
         except Exception:
             pass
 
+    def _prepare_input(self) -> Any:
+        """Prepare the input tensor from recent history."""
+        import torch
+
+        recent = self._history[-self._lookback:]
+        scaled = [(v - self._scaler_mean) / self._scaler_std for v in recent]
+        return torch.FloatTensor([scaled]).unsqueeze(-1)
+
     def predict(self, state_t: np.ndarray) -> np.ndarray:
         if not self._fitted or self._model is None:
             return np.array([self._history[-1]]) if self._history else np.zeros(1)
         try:
             import torch
 
-            recent = self._history[-self._lookback:]
-            if len(recent) < self._lookback:
+            if len(self._history) < self._lookback:
                 return np.array([self._history[-1]])
 
-            scaled = [(v - self._scaler_mean) / self._scaler_std for v in recent]
-            x = torch.FloatTensor([scaled]).unsqueeze(-1)
+            x = self._prepare_input()
             self._model.eval()
             with torch.no_grad():
                 pred_scaled = float(self._model(x).item())
@@ -1953,6 +1976,74 @@ class LSTMWrapper(BaseModelWrapper):
             return np.array([pred])
         except Exception:
             return np.array([self._history[-1]]) if self._history else np.zeros(1)
+
+    def predict_with_uncertainty(
+        self,
+        n_passes: int | None = None,
+    ) -> tuple[float, float, float]:
+        """MC Dropout prediction: run multiple forward passes with dropout
+        enabled to estimate epistemic uncertainty.
+
+        Returns
+        -------
+        (mean_prediction, epistemic_std, aleatoric_estimate)
+            - mean_prediction: average across MC passes
+            - epistemic_std: std dev across MC passes (model uncertainty)
+            - aleatoric_estimate: inherent noise (from training residuals)
+        """
+        if not self._fitted or self._model is None:
+            val = self._history[-1] if self._history else 0.0
+            return val, 0.0, 0.0
+
+        if n_passes is None:
+            n_passes = self._MC_FORWARD_PASSES
+
+        try:
+            import torch
+
+            if len(self._history) < self._lookback:
+                val = self._history[-1]
+                return val, 0.0, 0.0
+
+            x = self._prepare_input()
+
+            # Enable dropout at inference time (MC Dropout)
+            self._model.train()  # This keeps dropout active
+
+            predictions: list[float] = []
+            with torch.no_grad():
+                for _ in range(n_passes):
+                    pred_scaled = float(self._model(x).item())
+                    pred = pred_scaled * self._scaler_std + self._scaler_mean
+                    predictions.append(pred)
+
+            # Restore eval mode
+            self._model.eval()
+
+            preds_arr = np.array(predictions)
+            mean_pred = float(np.mean(preds_arr))
+            epistemic_std = float(np.std(preds_arr))
+
+            # Aleatoric estimate: use recent prediction errors as proxy
+            if len(self._history) > 10:
+                recent_vals = np.array(self._history[-20:])
+                aleatoric = float(np.std(np.diff(recent_vals)))
+            else:
+                aleatoric = 0.0
+
+            self._last_pred = mean_pred
+            self._last_epistemic_std = epistemic_std
+
+            return mean_pred, epistemic_std, aleatoric
+
+        except Exception:
+            val = self._history[-1] if self._history else 0.0
+            return val, 0.0, 0.0
+
+    @property
+    def epistemic_uncertainty(self) -> float:
+        """Last computed epistemic uncertainty from MC Dropout."""
+        return self._last_epistemic_std
 
     def update(
         self,

@@ -26,6 +26,9 @@ pymc>=5.0
 shap>=0.42             # SHAP explainability (F2)
 mapie>=0.8             # Conformal prediction alternative (F1)
 
+# Phase G: DTW and uncertainty
+dtaidistance>=2.3      # Dynamic Time Warping for historical analogs (G1)
+
 # Not yet implemented -- uncomment when adding these modules:
 # SALib>=1.4          # Sobol sensitivity analysis
 # TA-Lib>=0.4         # Candlestick pattern detection

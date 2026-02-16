@@ -708,6 +708,34 @@ def _build_predictions_forecasts(profile: dict[str, Any]) -> str:
             for feat, importance in list(global_imp.items())[:5]:
                 lines.append(f"- {feat}: {_fmt(importance, '.4f')} mean |SHAP|")
 
+    # Historical analogs (DTW)
+    analogs = profile.get("historical_analogs", {})
+    if analogs.get("available"):
+        lines.append("")
+        lines.append("### Historical Analogs (DTW Pattern Matching)")
+        lines.append("")
+        lines.append(f"*Method: {analogs.get('method', 'DTW')} | "
+                     f"Query window: {analogs.get('query_window_days', '?')} days | "
+                     f"Forecast horizon: {analogs.get('forecast_horizon_days', '?')} days*")
+        lines.append("")
+
+        emp = analogs.get("empirical_forecast", {})
+        if emp:
+            lines.append("**Empirical forecast from analog outcomes:**")
+            lines.append("")
+            lines.append(f"- Mean return: {_fmt(emp.get('return_mean_pct'))}%")
+            lines.append(f"- Median return: {_fmt(emp.get('return_median_pct'))}%")
+            lines.append(f"- Range: [{_fmt(emp.get('return_p5_pct'))}%, {_fmt(emp.get('return_p95_pct'))}%]")
+            lines.append(f"- Worst drawdown: {_fmt(emp.get('worst_drawdown_pct'))}%")
+            lines.append("")
+
+        analog_list = analogs.get("analogs", [])
+        if analog_list:
+            lines.append("**Closest historical matches:**")
+            lines.append("")
+            for a in analog_list[:5]:
+                lines.append(f"- {a.get('narrative', a.get('period', 'Unknown'))}")
+
     return "\n".join(lines)
 
 
@@ -809,16 +837,17 @@ def _build_appendix(profile: dict[str, Any]) -> str:
 
     lines.append("### Methodology Summary")
     lines.append("")
-    lines.append("This analysis uses **23+ mathematical modules** across 8 categories:")
+    lines.append("This analysis uses **25+ mathematical modules** across 9 categories:")
     lines.append("")
     lines.append("| Category | Modules |")
     lines.append("|----------|---------|")
     lines.append("| Regime Detection | HMM (Hidden Markov Model), GMM (Gaussian Mixture), PELT, Bayesian Change Point |")
-    lines.append("| Forecasting | Adaptive Kalman Filter, GARCH, VAR, LSTM, **Temporal Fusion Transformer (TFT)** |")
+    lines.append("| Forecasting | Adaptive Kalman Filter, GARCH, VAR, LSTM with MC Dropout, **Temporal Fusion Transformer (TFT)** |")
     lines.append("| Tree Ensembles | Random Forest, XGBoost, Gradient Boosting |")
     lines.append("| Causality | Granger Causality, Transfer Entropy, Copula Models |")
-    lines.append("| Uncertainty | **Conformal Prediction** (distribution-free intervals), Regime-Aware Monte Carlo, Importance Sampling |")
+    lines.append("| Uncertainty | **Conformal Prediction** (distribution-free intervals), **MC Dropout** (epistemic uncertainty), Regime-Aware Monte Carlo, Importance Sampling |")
     lines.append("| Explainability | **SHAP** (per-prediction feature attribution), Sobol Global Sensitivity |")
+    lines.append("| Historical Analogs | **Dynamic Time Warping (DTW)** for finding similar past periods |")
     lines.append("| Optimisation | Genetic Algorithm (ensemble weight tuning) |")
     lines.append("| Pattern Recognition | Candlestick Detector, Wavelet/Fourier Decomposition |")
     lines.append("")
@@ -860,6 +889,37 @@ def _build_appendix(profile: dict[str, Any]) -> str:
     lines.append("")
     lines.append("This is particularly valuable for our data which mixes daily prices, "
                  "quarterly financial statements, and annual macro indicators.")
+    lines.append("")
+
+    lines.append("### Dynamic Time Warping (DTW) Historical Analogs")
+    lines.append("")
+    lines.append("DTW finds past periods where the company showed a similar "
+                 "multi-variable pattern to the present. Instead of just matching "
+                 "by regime label, DTW considers the *shape* of the trajectory "
+                 "across multiple variables simultaneously (price, volatility, "
+                 "debt, margins, macro conditions).")
+    lines.append("")
+    lines.append("The outcomes from those historical analog periods serve as "
+                 "empirical priors: if 4 out of 5 analogs showed a 10% decline "
+                 "in the following month, that is a strong signal regardless of "
+                 "what the regression models predict.")
+    lines.append("")
+
+    lines.append("### MC Dropout (Epistemic Uncertainty)")
+    lines.append("")
+    lines.append("Standard neural networks give a single point prediction with "
+                 "no indication of how *confident* the model is. MC Dropout fixes "
+                 "this by running 100 forward passes through the LSTM with dropout "
+                 "enabled at inference time. The spread of those 100 predictions "
+                 "measures **epistemic uncertainty** -- how much the model itself "
+                 "is unsure.")
+    lines.append("")
+    lines.append("This is different from **aleatoric uncertainty** (inherent "
+                 "randomness in the data). A prediction with low epistemic but "
+                 "high aleatoric uncertainty means: *the model is confident in "
+                 "its estimate, but the variable is inherently noisy.* A prediction "
+                 "with high epistemic uncertainty means: *the model does not have "
+                 "enough information to make a reliable prediction.*")
     lines.append("")
 
     lines.append("### Forward Pass & Burn-Out Process")

@@ -207,13 +207,15 @@ You are a Bloomberg-style financial analyst specializing in comprehensive equity
 
 You have been provided with a complete company profile that includes:
 - 2 years of historical financial and market data
-- Advanced temporal analysis using 23+ mathematical models (HMM, Kalman, \
-GARCH, VAR, LSTM, Temporal Fusion Transformer, Random Forest, XGBoost, etc.)
+- Advanced temporal analysis using 25+ mathematical models (HMM, Kalman, \
+GARCH, VAR, LSTM with MC Dropout, Temporal Fusion Transformer, Random Forest, XGBoost, etc.)
 - Survival mode analysis (company + country)
 - Ethical filter assessments (Purchasing Power, Solvency, Gharar, Cash is King)
 - Multi-horizon predictions with Conformal Prediction intervals (distribution-free, \
 guaranteed coverage -- not Gaussian assumptions)
 - SHAP feature attribution explaining what drove each prediction
+- MC Dropout epistemic uncertainty (separates "model does not know" from "inherent randomness")
+- Dynamic Time Warping (DTW) historical analogs ("the last time this pattern occurred was...")
 - Regime detection and structural break analysis
 - Linked variables (sector, industry, competitors, macro from World Bank)
 
@@ -290,6 +292,15 @@ Survival probability for next day.
    **SHAP Feature Drivers:** For key predictions, explain WHAT drove the forecast \
 (e.g. "next-day cash_ratio prediction driven primarily by: +0.03 from declining \
 short-term debt, -0.01 from rising volatility"). Use the SHAP narratives from the profile data.
+   **Historical Analogs (DTW):** If available, describe the closest historical analog \
+periods found via Dynamic Time Warping. Example: "The last time this company showed \
+a similar pattern of rising debt + falling margins + high macro stress was [date]. \
+In the following month, the stock [outcome]." Include the empirical return distribution \
+from analog outcomes.
+   **Epistemic vs Aleatoric Uncertainty:** Where MC Dropout data is available, \
+distinguish between model uncertainty ("the model is unsure about this prediction") \
+and inherent randomness ("even a perfect model would see variance here"). This helps \
+investors understand the *quality* of each prediction.
 
 9. TECHNICAL PATTERNS & CHART ANALYSIS
    - Describe the 2-year price chart with regime shading
@@ -332,8 +343,9 @@ Must be easy for a non-technical client to understand.
       * Tree Ensembles: Random Forest, XGBoost, Gradient Boosting
       * Causality: Granger Causality, Transfer Entropy, Copula Models
       * Uncertainty: Conformal Prediction (distribution-free intervals), \
-Regime-Aware Monte Carlo, Importance Sampling
+MC Dropout (epistemic uncertainty), Regime-Aware Monte Carlo, Importance Sampling
       * Explainability: SHAP (per-prediction feature attribution), Sobol Sensitivity
+      * Historical Analogs: Dynamic Time Warping (DTW) for finding similar past periods
       * Optimisation: Genetic Algorithm for ensemble weights
       * Pattern Recognition: Candlestick Detector, Wavelet/Fourier Decomposition
     - Forward pass + burn-out process explanation (day-by-day predict-compare-update)
