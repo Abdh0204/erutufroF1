@@ -215,21 +215,24 @@ Examples:
     logger.info("")
     logger.info("Step 4: Building 2-year daily cache...")
 
-    from operator1.steps.data_extraction import extract_target_data
-    from operator1.steps.cache_builder import build_daily_cache
+    from operator1.steps.data_extraction import extract_all_data
+    from operator1.steps.cache_builder import build_all_caches
 
-    lookback_days = int(args.years * 365)
-    date_start = (date.today() - timedelta(days=lookback_days)).isoformat()
-    date_end = date.today().isoformat()
+    # Build a list of linked ISINs from relationships
+    linked_isins: list = []
+    for group_entities in relationships.values():
+        if isinstance(group_entities, list):
+            for ent in group_entities:
+                isin = ent.get("isin") if isinstance(ent, dict) else getattr(ent, "isin", None)
+                if isin:
+                    linked_isins.append(isin)
 
     try:
-        raw_data = extract_target_data(
-            isin=args.isin,
-            fmp_symbol=args.symbol,
+        raw_data = extract_all_data(
+            target=verified,
+            linked_isins=linked_isins,
             eulerpool_client=eulerpool_client,
             fmp_client=fmp_client,
-            start_date=date_start,
-            end_date=date_end,
         )
         logger.info("Raw data extracted")
     except Exception as exc:
@@ -237,10 +240,8 @@ Examples:
         return 1
 
     try:
-        cache = build_daily_cache(
-            target_data=raw_data,
-            macro_data=macro_data,
-        )
+        cache_result = build_all_caches(extraction=raw_data)
+        cache = cache_result.target_daily
         logger.info("Cache built: %d rows x %d columns", len(cache), len(cache.columns))
     except Exception as exc:
         logger.error("Cache building failed: %s", exc)
@@ -252,29 +253,29 @@ Examples:
     logger.info("")
     logger.info("Step 5: Computing derived features...")
 
-    from operator1.features.derived_variables import compute_derived_features
-    from operator1.analysis.survival_mode import detect_company_survival_mode
-    from operator1.analysis.hierarchy_weights import select_hierarchy_weights
+    from operator1.features.derived_variables import compute_derived_variables
+    from operator1.analysis.survival_mode import compute_company_survival_flag
+    from operator1.analysis.hierarchy_weights import compute_hierarchy_weights
 
     try:
-        cache = compute_derived_features(cache)
+        cache = compute_derived_variables(cache)
         logger.info("Features computed: %d columns", len(cache.columns))
     except Exception as exc:
         logger.warning("Feature engineering partially failed: %s", exc)
 
     # Survival mode
+    weights: dict = {f"tier{i}": 20.0 for i in range(1, 6)}
     try:
-        cache["company_survival_mode_flag"] = detect_company_survival_mode(cache)
-        weights = select_hierarchy_weights(
-            company_survival=bool(cache["company_survival_mode_flag"].iloc[-1]),
-            country_survival=False,
-            country_protected=False,
-            vanity_pct=0.0,
-        )
+        cache["company_survival_mode_flag"] = compute_company_survival_flag(cache)
+        cache = compute_hierarchy_weights(cache)
+        # Extract latest weights from the cache columns
+        for i in range(1, 6):
+            col = f"hierarchy_tier{i}_weight"
+            if col in cache.columns:
+                weights[f"tier{i}"] = float(cache[col].iloc[-1])
         logger.info("Survival mode: %d days flagged", cache["company_survival_mode_flag"].sum())
     except Exception as exc:
         logger.warning("Survival mode detection failed: %s", exc)
-        weights = {f"tier{i}": 20.0 for i in range(1, 6)}
 
     # ------------------------------------------------------------------
     # Step 6: Temporal modeling (optional)
@@ -282,12 +283,14 @@ Examples:
     forecast_result = None
     forward_pass_result = None
     burnout_result = None
+    mc_result = None
+    pred_result = None
 
     if not args.skip_models:
         logger.info("")
         logger.info("Step 6: Running temporal models...")
 
-        from operator1.models.regime_detector import detect_regimes
+        from operator1.models.regime_detector import detect_regimes_and_breaks
         from operator1.models.forecasting import (
             run_forecasting,
             run_forward_pass,
@@ -298,7 +301,7 @@ Examples:
 
         # Regime detection
         try:
-            cache = detect_regimes(cache)
+            cache, _regime_detector = detect_regimes_and_breaks(cache)
             logger.info("Regimes detected")
         except Exception as exc:
             logger.warning("Regime detection failed: %s", exc)
@@ -338,7 +341,6 @@ Examples:
             logger.warning("Burn-out failed: %s", exc)
 
         # Monte Carlo
-        mc_result = None
         try:
             mc_result = run_monte_carlo(cache)
             logger.info("Monte Carlo simulation complete")
@@ -351,7 +353,7 @@ Examples:
                 pred_result = run_prediction_aggregation(
                     cache, forecast_result, mc_result,
                 )
-                logger.info("Predictions aggregated: %d variables", len(pred_result.variables_predicted))
+                logger.info("Predictions aggregated")
             except Exception as exc:
                 logger.warning("Prediction aggregation failed: %s", exc)
     else:
@@ -367,9 +369,8 @@ Examples:
 
     try:
         profile = build_company_profile(
+            verified_target=target_profile,
             cache=cache,
-            target_info=target_profile,
-            relationships=relationships,
         )
         # Save profile
         profile_path = Path(args.output_dir) / "company_profile.json"
