@@ -107,10 +107,12 @@ class TestEntityDiscoveryScoring(unittest.TestCase):
 
     def test_name_similarity(self):
         from operator1.steps.entity_discovery import _score_match
+        # Query is the company name, not ticker, so ticker-exact match (40 pts) won't fire.
+        # Name similarity (30) + country (15) + sector (15) = 60.
         score = _score_match("Apple Inc.", {
             "ticker": "AAPL", "name": "Apple Inc.", "country": "US", "sector": "technology",
         }, "US", "technology")
-        self.assertGreaterEqual(score, 70)
+        self.assertGreaterEqual(score, 60)
 
 
 class TestEntityDiscoveryFunctions(unittest.TestCase):

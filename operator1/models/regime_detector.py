@@ -426,10 +426,13 @@ class RegimeDetector:
 
         # Sufficient statistics for Gaussian predictive distribution.
         # Using the conjugate normal-inverse-gamma model.
-        mu0 = series[0]
+        # Use overall mean as prior center with moderate prior strength
+        # so the model needs a few observations to adapt after a changepoint,
+        # making the shift detectable via lower predictive probability.
+        mu0 = float(np.mean(series))
         kappa0 = 1.0
         alpha0 = 1.0
-        beta0 = 1.0
+        beta0 = float(np.var(series) * 0.1 + 1e-6)  # tight initial variance
 
         # Per-run-length sufficient stats (vectorised).
         mu_params = np.full(n + 1, mu0)

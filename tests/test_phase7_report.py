@@ -239,7 +239,7 @@ class TestProfileBuilder(unittest.TestCase):
             "meta", "identity", "survival", "vanity",
             "linked_entities", "regimes", "predictions",
             "monte_carlo", "model_metrics", "data_quality",
-            "estimation", "failed_modules",
+            "estimation", "failed_modules", "filters",
         }
         self.assertEqual(set(profile.keys()), expected_keys)
 
@@ -511,10 +511,9 @@ class TestReportGenerator(unittest.TestCase):
             "Executive Summary",
             "Company Overview",
             "Financial Health",
-            "Survival Analysis",
-            "Linked Entities",
-            "Regime Analysis",
-            "Risk Assessment",
+            "Survival Mode Analysis",
+            "Linked Variables",
+            "Temporal Analysis",
             "LIMITATIONS",
         ]:
             self.assertIn(

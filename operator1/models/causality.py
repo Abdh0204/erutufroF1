@@ -80,19 +80,7 @@ def compute_granger_causality(
         entry ``[y, x]`` is 1 if ``x`` Granger-causes ``y`` at the
         given significance level, else 0.
     """
-    try:
-        from statsmodels.tsa.stattools import grangercausalitytests  # type: ignore[import-untyped]
-    except ImportError:
-        logger.warning(
-            "statsmodels not installed -- returning empty causality matrix"
-        )
-        return pd.DataFrame(
-            np.zeros((len(variables), len(variables))),
-            index=variables,
-            columns=variables,
-        )
-
-    # Filter to available columns.
+    # Filter to available columns first (before dependency check).
     available = [v for v in variables if v in cache.columns]
     missing = set(variables) - set(available)
     if missing:
@@ -102,6 +90,17 @@ def compute_granger_causality(
             sorted(missing)[:5],
         )
 
+    try:
+        from statsmodels.tsa.stattools import grangercausalitytests  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning(
+            "statsmodels not installed -- returning empty causality matrix"
+        )
+        return pd.DataFrame(
+            np.zeros((len(available), len(available))),
+            index=available,
+            columns=available,
+        )
     if len(available) < 2:
         logger.warning("Need at least 2 variables for Granger test")
         return pd.DataFrame(

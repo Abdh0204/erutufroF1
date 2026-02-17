@@ -403,20 +403,24 @@ class TestTierMembership(unittest.TestCase):
 
         membership = _build_tier_membership()
 
-        # current_ratio should be in tier 1 (Liquidity & Solvency)
-        self.assertEqual(membership.get("current_ratio"), 1)
+        # Per corrected survival_hierarchy.yml:
+        # tier1 = Liquidity & Cash (cash_ratio, etc.)
+        # tier2 = Debt & Solvency (current_ratio, debt_to_equity, etc.)
+        # tier3 = Market Stability (volatility_21d, drawdown_252d, volume)
+        # tier4 = Profitability (gross_margin, operating_margin, net_margin)
+        # tier5 = Growth & Valuation (revenue_asof, pe_ratio, ev_to_ebitda)
 
-        # debt_to_equity_abs should be in tier 2
-        self.assertEqual(membership.get("debt_to_equity_abs"), 2)
+        # current_ratio is in tier 2 (Debt & Solvency)
+        self.assertEqual(membership.get("current_ratio"), 2)
 
-        # free_cash_flow should be in tier 3
-        self.assertEqual(membership.get("free_cash_flow"), 3)
+        # cash_ratio is in tier 1 (Liquidity & Cash)
+        self.assertEqual(membership.get("cash_ratio"), 1)
 
         # gross_margin should be in tier 4
         self.assertEqual(membership.get("gross_margin"), 4)
 
-        # pe_ratio_calc should be in tier 5
-        self.assertEqual(membership.get("pe_ratio_calc"), 5)
+        # pe_ratio should be in tier 5
+        self.assertEqual(membership.get("pe_ratio"), 5)
 
 
 # ===========================================================================
