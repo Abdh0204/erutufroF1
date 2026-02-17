@@ -176,7 +176,8 @@ class TestRequestLogFlush(unittest.TestCase):
         import os
         from operator1.http_utils import _request_log, flush_request_log
 
-        # Add a fake entry
+        # Clear any stale entries from previous tests, then add a fake entry
+        _request_log.clear()
         _request_log.append({"url": "https://example.com", "status": 200})
 
         with tempfile.TemporaryDirectory() as tmpdir:

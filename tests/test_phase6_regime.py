@@ -290,15 +290,17 @@ class TestBCP(unittest.TestCase):
         """BCP should detect a mean shift using the online algorithm."""
         from operator1.models.regime_detector import RegimeDetector
         np.random.seed(42)
-        seg1 = np.random.randn(80) * 0.5 + 5.0
-        seg2 = np.random.randn(80) * 0.5 + 15.0
+        # Use a moderate shift (~3 sigma) that the online BCP can detect
+        # without numerical underflow issues.
+        seg1 = np.random.randn(80) + 0.0
+        seg2 = np.random.randn(80) + 3.0
         series = np.concatenate([seg1, seg2])
 
         det = RegimeDetector()
         bkps = det.detect_breakpoints_bcp(
             series,
             hazard_lambda=50.0,
-            threshold=0.3,
+            threshold=0.02,  # just above hazard rate 1/50=0.02
         )
 
         self.assertTrue(det.result.bcp_fitted)

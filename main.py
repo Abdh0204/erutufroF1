@@ -120,27 +120,29 @@ Examples:
     logger.info("")
     logger.info("Step 1: Verifying identifiers...")
 
-    from operator1.clients.eulerpool import EulerPoolClient
+    from operator1.clients.eulerpool import EulerportClient
     from operator1.clients.fmp import FMPClient
     from operator1.steps.verify_identifiers import verify_identifiers
 
-    eulerpool_client = EulerPoolClient(api_key=eulerpool_key)
+    eulerpool_client = EulerportClient(api_key=eulerpool_key)
     fmp_client = FMPClient(api_key=fmp_key)
 
     try:
-        verification = verify_identifiers(
+        verified = verify_identifiers(
             target_isin=args.isin,
             fmp_symbol=args.symbol,
             eulerpool_client=eulerpool_client,
             fmp_client=fmp_client,
         )
-        logger.info("Verification passed: %s (%s)", verification.get("name", "?"), verification.get("country", "?"))
+        logger.info("Verification passed: %s (%s)", verified.name or "?", verified.country or "?")
     except Exception as exc:
         logger.error("Identifier verification failed: %s", exc)
         logger.error("Check that your ISIN and FMP symbol are correct.")
         return 1
 
-    target_profile = verification
+    # Convert dataclass to dict for downstream compatibility
+    from dataclasses import asdict
+    target_profile = asdict(verified)
 
     # ------------------------------------------------------------------
     # Report-only mode
@@ -155,13 +157,13 @@ Examples:
     logger.info("Step 2: Fetching macro data from World Bank...")
 
     from operator1.clients.world_bank import WorldBankClient
-    from operator1.steps.macro_mapping import fetch_macro_indicators
+    from operator1.steps.macro_mapping import fetch_macro_data
 
     wb_client = WorldBankClient()
     country_code = target_profile.get("country", "US")
 
     try:
-        macro_data = fetch_macro_indicators(
+        macro_data = fetch_macro_data(
             country_iso2=country_code,
             wb_client=wb_client,
         )
