@@ -2490,6 +2490,7 @@ class ForwardPassResult:
     predictions_log: list[dict[str, Any]] = field(default_factory=list)
     total_days: int = 0
     warmup_days: int = 0
+    pid_summary: dict[str, Any] = field(default_factory=dict)  # PID controller state
 
 
 def _init_model_wrappers(
@@ -2578,6 +2579,13 @@ def run_forward_pass(
     """
     logger.info("Starting forward pass (warmup=%d days)...", warmup_days)
 
+    # Initialise PID bank for adaptive learning rate adjustment
+    try:
+        from operator1.models.pid_controller import create_pid_bank, compute_pid_adjustment
+        _pid_available = True
+    except ImportError:
+        _pid_available = False
+
     result = ForwardPassResult(warmup_days=warmup_days)
 
     if tier_variables is None:
@@ -2604,6 +2612,12 @@ def run_forward_pass(
     # Initialise model wrappers for each variable (cold-start on warmup window)
     warmup_cache = cache.iloc[:warmup_days] if warmup_days < len(cache) else cache
     model_bank: dict[str, list[BaseModelWrapper]] = {}
+
+    # Create PID controllers for adaptive learning rates
+    pid_bank = None
+    if _pid_available and all_vars:
+        pid_bank = create_pid_bank(all_vars, tier_weights=hierarchy_weights)
+        logger.info("PID bank initialised for %d variables", len(all_vars))
     for var_name in all_vars:
         tier_key = f"tier{var_to_tier[var_name]}"
         tier_map = tier_variables
@@ -2666,10 +2680,18 @@ def run_forward_pass(
                 "regime": regime_t,
             })
 
-            # Step E: Online update
+            # Step E: Online update with PID-adjusted learning rate
+            pid_multiplier = 1.0
+            if pid_bank is not None:
+                pid_multiplier = pid_bank[var_name].update(error) if var_name in pid_bank else 1.0
+
+            # Scale the hierarchy weights by PID multiplier for this update
+            adjusted_weights = {
+                k: v * pid_multiplier for k, v in hierarchy_weights.items()
+            }
             for wrapper in model_bank.get(var_name, []):
                 try:
-                    wrapper.update(state_t, actual_t1, hierarchy_weights)
+                    wrapper.update(state_t, actual_t1, adjusted_weights)
                 except Exception:
                     wrapper.failed_update = True
 
@@ -2690,6 +2712,16 @@ def run_forward_pass(
         k: float(np.mean(v)) if v else 0.0
         for k, v in result.errors_by_tier.items()
     }
+    # Compute PID bank summary
+    pid_summary = None
+    if pid_bank is not None and _pid_available:
+        pid_summary = compute_pid_adjustment(pid_bank, {v: 0.0 for v in all_vars})
+        result.pid_summary = pid_summary.to_dict()
+        logger.info(
+            "PID summary: mean_multiplier=%.3f, max=%.3f",
+            pid_summary.mean_multiplier, pid_summary.max_multiplier,
+        )
+
     logger.info(
         "Forward pass complete: %d prediction steps, avg tier errors: %s",
         total_errors, avg_errors,

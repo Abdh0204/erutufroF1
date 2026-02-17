@@ -108,6 +108,30 @@ _FALLBACK_TEMPLATE = """\
 
 ---
 
+## 10a. Supply Chain & Network Risk (Graph Theory)
+
+{graph_risk}
+
+---
+
+## 10b. Competitive Dynamics (Game Theory)
+
+{game_theory}
+
+---
+
+## 10c. Government Protection Assessment (Fuzzy Logic)
+
+{fuzzy_protection}
+
+---
+
+## 10d. Adaptive Learning (PID Controller)
+
+{pid_controller}
+
+---
+
 ## 11. Risk Factors & Limitations
 
 {risk_assessment}
@@ -840,6 +864,144 @@ def _build_investment_recommendation(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Advanced module report sections
+# ---------------------------------------------------------------------------
+
+
+def _build_graph_risk_section(profile: dict[str, Any]) -> str:
+    """Build Graph Theory / Supply Chain Risk section."""
+    gr = profile.get("graph_risk", {})
+    if not gr.get("available"):
+        return "*Graph risk analysis not available for this run.*"
+
+    lines = [
+        "### Network Topology",
+        "",
+        f"- **Nodes**: {gr.get('n_nodes', 0)} entities in the network",
+        f"- **Edges**: {gr.get('n_edges', 0)} relationship links",
+        f"- **Target degree centrality**: {_fmt(gr.get('target_degree_centrality'))}",
+        f"- **Target PageRank**: {_fmt(gr.get('target_pagerank'))}",
+        "",
+        "### Contagion Risk",
+        "",
+        f"- **Target infection probability**: {_pct(gr.get('contagion_target_infection_prob'))}",
+        f"  *(If any linked entity enters distress, this is the probability of cascading to the target.)*",
+        f"- **Expected infected entities**: {_fmt(gr.get('contagion_expected_infected'), '.1f')}",
+        "",
+        "### Supply Chain Concentration",
+        "",
+        f"- **Supplier HHI**: {_fmt(gr.get('supplier_hhi'))} ({gr.get('concentration_label', 'N/A')})",
+        f"- **Customer HHI**: {_fmt(gr.get('customer_hhi'))}",
+        "",
+    ]
+
+    top_pr = gr.get("top_pagerank", {})
+    if top_pr:
+        lines.append("### Most Influential Entities (PageRank)")
+        lines.append("")
+        for name, score in list(top_pr.items())[:5]:
+            lines.append(f"- **{name}**: {_fmt(score, '.4f')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_game_theory_section(profile: dict[str, Any]) -> str:
+    """Build Game Theory / Competitive Dynamics section."""
+    gt = profile.get("game_theory", {})
+    if not gt.get("available"):
+        return "*Game theory analysis not available for this run.*"
+
+    lines = [
+        f"**Market structure**: {gt.get('market_structure', 'N/A')}",
+        f"**Competitors analysed**: {gt.get('n_competitors', 0)}",
+        f"**CR4 concentration**: {_pct(gt.get('cr4'))}",
+        "",
+        "### Competitive Pressure",
+        "",
+        f"- **Pressure index**: {_fmt(gt.get('competitive_pressure'))} ({gt.get('pressure_label', 'N/A')})",
+        "",
+        "### Stackelberg Leadership",
+        "",
+    ]
+
+    stk = gt.get("stackelberg", {})
+    lines.append(f"- **Target role**: {stk.get('target_role', 'N/A')}")
+    lines.append(f"- **Leadership score**: {_fmt(stk.get('leadership_score'))}")
+    lines.append(f"- **Market cap rank**: #{stk.get('market_cap_rank', 'N/A')}")
+    lines.append(f"- **Margin advantage**: {_pct(stk.get('margin_advantage'))}")
+    lines.append("")
+
+    cournot = gt.get("cournot", {})
+    eq_shares = cournot.get("equilibrium_shares", {})
+    if eq_shares:
+        lines.append("### Cournot Equilibrium (Nash) Market Shares")
+        lines.append("")
+        for name, share in eq_shares.items():
+            lines.append(f"- **{name}**: {_pct(share)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_fuzzy_protection_section(profile: dict[str, Any]) -> str:
+    """Build Fuzzy Logic Government Protection section."""
+    fp = profile.get("fuzzy_protection", {})
+    if not fp.get("available"):
+        return "*Fuzzy protection analysis not available for this run.*"
+
+    lines = [
+        f"**Protection degree**: {_fmt(fp.get('mean_degree', fp.get('protection_degree')))} / 1.00",
+        f"**Label**: {fp.get('latest_label', fp.get('label', 'N/A'))}",
+        "",
+        "### Dimension Scores",
+        "",
+        f"- **Sector strategicness**: {_fmt(fp.get('sector_score'))} *(How important is the sector to the government?)*",
+        f"- **Economic significance**: {_fmt(fp.get('economic_score', fp.get('mean_economic')))} *(Market cap relative to GDP)*",
+        f"- **Policy responsiveness**: {_fmt(fp.get('policy_score', fp.get('mean_policy')))} *(Emergency rate cuts)*",
+        "",
+        "*Higher scores indicate the company is more likely to receive government support during crises, "
+        "which reduces downside risk in extreme scenarios.*",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _build_pid_section(profile: dict[str, Any]) -> str:
+    """Build PID Controller adaptive learning section."""
+    pid = profile.get("pid_controller", {})
+    if not pid.get("available", True) or not pid:
+        return "*PID adaptive learning not available for this run.*"
+
+    lines = [
+        "The forward pass uses a PID (Proportional-Integral-Derivative) controller "
+        "to dynamically adjust model learning rates based on prediction error feedback.",
+        "",
+        f"- **Mean learning multiplier**: {_fmt(pid.get('mean_multiplier'))}",
+        f"- **Max multiplier**: {_fmt(pid.get('max_multiplier'))} *(most aggressive correction during the run)*",
+        f"- **Min multiplier**: {_fmt(pid.get('min_multiplier'))} *(most conservative period)*",
+        f"- **Variables controlled**: {pid.get('n_variables', 0)}",
+        "",
+    ]
+
+    per_var = pid.get("per_variable", {})
+    if per_var:
+        lines.append("### Top PID Adjustments (by output)")
+        lines.append("")
+        sorted_vars = sorted(per_var.items(), key=lambda x: x[1].get("output", 1.0), reverse=True)
+        for var, state in sorted_vars[:5]:
+            lines.append(
+                f"- **{var}**: multiplier={_fmt(state.get('output'))} "
+                f"(P={_fmt(state.get('proportional'))}, "
+                f"I={_fmt(state.get('integral'))}, "
+                f"D={_fmt(state.get('derivative'))})"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _build_appendix(profile: dict[str, Any]) -> str:
     """Build the Appendix section (Section 13)."""
     lines: list[str] = []
@@ -992,6 +1154,10 @@ def _build_fallback_report(profile: dict[str, Any]) -> str:
         predictions_forecasts=_build_predictions_forecasts(profile),
         technical_patterns=_build_technical_patterns(profile),
         ethical_filters=_build_ethical_filters_section(profile),
+        graph_risk=_build_graph_risk_section(profile),
+        game_theory=_build_game_theory_section(profile),
+        fuzzy_protection=_build_fuzzy_protection_section(profile),
+        pid_controller=_build_pid_section(profile),
         risk_assessment=_build_risk_assessment(profile),
         limitations=_build_limitations(profile),
         investment_recommendation=_build_investment_recommendation(profile),
