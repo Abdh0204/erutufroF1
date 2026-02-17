@@ -360,17 +360,26 @@ def _build_regime_analysis(profile: dict[str, Any]) -> str:
         lines.append("")
         horizons = preds.get("horizons", {})
         for h_label in ("1d", "5d", "21d", "252d"):
-            h_preds = horizons.get(h_label, [])
+            h_preds = horizons.get(h_label, {})
             if h_preds:
                 lines.append(f"**{h_label} horizon:**")
-                for p in h_preds[:5]:  # Top 5 for brevity
-                    var = p.get("variable", "?")
-                    pf = _fmt(p.get("point_forecast"))
-                    ci_lo = _fmt(p.get("lower_ci"))
-                    ci_hi = _fmt(p.get("upper_ci"))
-                    lines.append(
-                        f"- {var}: {pf} [{ci_lo}, {ci_hi}]"
-                    )
+                # Handle both list format [{variable, point_forecast, ...}]
+                # and dict format {variable: {point, lower, upper}}
+                if isinstance(h_preds, list):
+                    items = h_preds[:5]
+                    for p in items:
+                        var = p.get("variable", "?")
+                        pf = _fmt(p.get("point_forecast"))
+                        ci_lo = _fmt(p.get("lower_ci"))
+                        ci_hi = _fmt(p.get("upper_ci"))
+                        lines.append(f"- {var}: {pf} [{ci_lo}, {ci_hi}]")
+                elif isinstance(h_preds, dict):
+                    for var, vals in list(h_preds.items())[:5]:
+                        if isinstance(vals, dict):
+                            pf = _fmt(vals.get("point") or vals.get("point_forecast"))
+                            ci_lo = _fmt(vals.get("lower") or vals.get("lower_ci"))
+                            ci_hi = _fmt(vals.get("upper") or vals.get("upper_ci"))
+                            lines.append(f"- {var}: {pf} [{ci_lo}, {ci_hi}]")
                 lines.append("")
     else:
         lines.append("Forecast data unavailable.")
