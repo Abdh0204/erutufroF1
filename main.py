@@ -206,8 +206,39 @@ Examples:
             logger.info("Linked entities discovered: %d", total_linked)
         except Exception as exc:
             logger.warning("Entity discovery failed (continuing without): %s", exc)
+
+        # Step 3b: Graph Theory risk analysis on entity network
+        graph_risk_result = None
+        try:
+            from operator1.models.graph_risk import compute_graph_risk_metrics
+            graph_risk_result = compute_graph_risk_metrics(
+                target_isin=args.isin,
+                relationships=relationships,
+            )
+            logger.info(
+                "Graph risk: %d nodes, centrality=%.3f, contagion_prob=%.3f",
+                graph_risk_result.n_nodes,
+                graph_risk_result.target_degree_centrality,
+                graph_risk_result.contagion_target_infection_prob,
+            )
+        except Exception as exc:
+            logger.warning("Graph risk analysis failed: %s", exc)
+
+        # Step 3c: Game Theory competitive dynamics
+        game_theory_result = None
+        try:
+            from operator1.models.game_theory import analyze_competitive_dynamics
+            game_theory_result = analyze_competitive_dynamics(
+                target_cache=pd.DataFrame(),  # populated after cache build
+                target_name=target_profile.get("name", "target"),
+            )
+            logger.info("Game theory: placeholder (full analysis after cache build)")
+        except Exception as exc:
+            logger.warning("Game theory analysis failed: %s", exc)
     else:
         logger.info("Step 3: Skipped (--skip-linked)")
+        graph_risk_result = None
+        game_theory_result = None
 
     # ------------------------------------------------------------------
     # Step 4: Extract data and build cache
@@ -276,6 +307,52 @@ Examples:
         logger.info("Survival mode: %d days flagged", cache["company_survival_mode_flag"].sum())
     except Exception as exc:
         logger.warning("Survival mode detection failed: %s", exc)
+
+    # Step 5b: Fuzzy Logic government protection (replaces binary flag)
+    fuzzy_result = None
+    try:
+        from operator1.analysis.fuzzy_protection import compute_fuzzy_protection
+        # Get GDP from macro data if available
+        gdp_val = None
+        if macro_data is not None and hasattr(macro_data, 'indicators'):
+            gdp_df = macro_data.indicators.get("gdp_current_usd")
+            if gdp_df is not None and not gdp_df.empty:
+                gdp_val = float(gdp_df["value"].dropna().iloc[-1])
+
+        cache = compute_fuzzy_protection(
+            cache,
+            sector=target_profile.get("sector"),
+            gdp=gdp_val,
+        )
+        fuzzy_result = {
+            "mean_degree": float(cache["fuzzy_protection_degree"].mean()),
+            "sector_score": float(cache["fuzzy_sector_score"].iloc[0]),
+            "latest_label": cache["fuzzy_protection_label"].iloc[-1],
+        }
+        logger.info(
+            "Fuzzy protection: degree=%.3f (%s)",
+            fuzzy_result["mean_degree"],
+            fuzzy_result["latest_label"],
+        )
+    except Exception as exc:
+        logger.warning("Fuzzy protection analysis failed: %s", exc)
+
+    # Step 5c: Game Theory competitive analysis (now that cache is built)
+    if not args.skip_linked and relationships:
+        try:
+            from operator1.models.game_theory import analyze_competitive_dynamics
+            game_theory_result = analyze_competitive_dynamics(
+                target_cache=cache,
+                target_name=target_profile.get("name", "target"),
+            )
+            logger.info(
+                "Game theory: %s, pressure=%.3f (%s)",
+                game_theory_result.market_structure,
+                game_theory_result.competitive_pressure,
+                game_theory_result.stackelberg.target_role,
+            )
+        except Exception as exc:
+            logger.warning("Game theory analysis failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Step 6: Temporal modeling (optional)

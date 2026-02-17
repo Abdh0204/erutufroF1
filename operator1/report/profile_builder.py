@@ -590,6 +590,11 @@ def build_company_profile(
     quality_report_path: str | Path | None = None,
     estimation_coverage_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    # Advanced modules
+    graph_risk_result: dict[str, Any] | None = None,
+    game_theory_result: dict[str, Any] | None = None,
+    fuzzy_protection_result: dict[str, Any] | None = None,
+    pid_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the comprehensive company profile JSON.
 
@@ -669,6 +674,10 @@ def build_company_profile(
         "monte_carlo": _build_monte_carlo_section(mc_result),
         "model_metrics": _build_model_metrics_section(forecast_result),
         "filters": _build_ethical_filters_section(cache),
+        "graph_risk": graph_risk_result if graph_risk_result else {"available": False},
+        "game_theory": game_theory_result if game_theory_result else {"available": False},
+        "fuzzy_protection": fuzzy_protection_result if fuzzy_protection_result else {"available": False},
+        "pid_controller": pid_summary if pid_summary else {"available": False},
         "data_quality": _build_data_quality_section(quality_report_path),
         "estimation": _build_estimation_section(estimation_coverage_path),
         "failed_modules": _build_failed_modules_section(
