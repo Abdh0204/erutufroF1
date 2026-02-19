@@ -574,6 +574,54 @@ def _build_failed_modules_section(
 
 
 # ---------------------------------------------------------------------------
+# Financial health section
+# ---------------------------------------------------------------------------
+
+
+def _build_financial_health_section(
+    cache: pd.DataFrame | None,
+    fh_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the financial health section from cache fh_* columns and result summary."""
+    section: dict[str, Any] = {"available": False}
+
+    # If we have a pre-computed result dict, use it as the base
+    if fh_result:
+        section = {
+            "available": True,
+            "latest_composite": _safe_float(fh_result.get("latest_composite")),
+            "latest_label": fh_result.get("latest_label", "Unknown"),
+            "mean_composite": _safe_float(fh_result.get("mean_composite")),
+            "n_days_scored": fh_result.get("n_days_scored", 0),
+            "tier_means": {
+                k: _safe_float(v)
+                for k, v in (fh_result.get("tier_means") or {}).items()
+            },
+            "columns_added": fh_result.get("columns_added", []),
+        }
+
+    # Enrich with time-series summary from cache columns if available
+    if cache is not None and not cache.empty:
+        for col in (
+            "fh_liquidity_score", "fh_solvency_score", "fh_stability_score",
+            "fh_profitability_score", "fh_growth_score", "fh_composite_score",
+        ):
+            if col in cache.columns:
+                section.setdefault("series_summary", {})[col] = _series_summary(cache[col])
+                if not section.get("available"):
+                    section["available"] = True
+
+        # Composite label distribution
+        if "fh_composite_label" in cache.columns:
+            vc = cache["fh_composite_label"].value_counts(normalize=True)
+            section["label_distribution_pct"] = {
+                str(k): round(float(v), 4) for k, v in vc.items()
+            }
+
+    return section
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -595,6 +643,7 @@ def build_company_profile(
     game_theory_result: dict[str, Any] | None = None,
     fuzzy_protection_result: dict[str, Any] | None = None,
     pid_summary: dict[str, Any] | None = None,
+    financial_health_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the comprehensive company profile JSON.
 
@@ -678,6 +727,7 @@ def build_company_profile(
         "game_theory": game_theory_result if game_theory_result else {"available": False},
         "fuzzy_protection": fuzzy_protection_result if fuzzy_protection_result else {"available": False},
         "pid_controller": pid_summary if pid_summary else {"available": False},
+        "financial_health": _build_financial_health_section(cache, financial_health_result),
         "data_quality": _build_data_quality_section(quality_report_path),
         "estimation": _build_estimation_section(estimation_coverage_path),
         "failed_modules": _build_failed_modules_section(

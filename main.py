@@ -355,6 +355,25 @@ Examples:
             logger.warning("Game theory analysis failed: %s", exc)
 
     # ------------------------------------------------------------------
+    # Step 5d: Financial health scores (injected into cache for temporal learning)
+    # ------------------------------------------------------------------
+    fh_result = None
+    try:
+        from operator1.models.financial_health import compute_financial_health
+        cache, fh_result = compute_financial_health(
+            cache,
+            hierarchy_weights=weights,
+        )
+        logger.info(
+            "Financial health: composite=%.1f (%s), %d columns added",
+            fh_result.latest_composite,
+            fh_result.latest_label,
+            len(fh_result.columns_added),
+        )
+    except Exception as exc:
+        logger.warning("Financial health scoring failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Step 6: Temporal modeling (optional)
     # ------------------------------------------------------------------
     forecast_result = None
@@ -444,10 +463,20 @@ Examples:
 
     from operator1.report.profile_builder import build_company_profile
 
+    # Convert fh_result to dict for profile builder
+    fh_dict = None
+    if fh_result is not None:
+        from dataclasses import asdict as _asdict
+        try:
+            fh_dict = _asdict(fh_result)
+        except Exception:
+            fh_dict = fh_result.__dict__.copy() if hasattr(fh_result, "__dict__") else None
+
     try:
         profile = build_company_profile(
             verified_target=target_profile,
             cache=cache,
+            financial_health_result=fh_dict,
         )
         # Save profile
         profile_path = Path(args.output_dir) / "company_profile.json"
