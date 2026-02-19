@@ -395,6 +395,15 @@ Examples:
         from operator1.models.monte_carlo import run_monte_carlo
         from operator1.models.prediction_aggregator import run_prediction_aggregation
 
+        # Collect fh_* columns that temporal models should also learn from.
+        # These were injected by Step 5d (financial health scoring).
+        _fh_extra_vars = [
+            c for c in cache.columns
+            if c.startswith("fh_") and cache[c].dtype in ("float64", "float32", "int64")
+        ]
+        if _fh_extra_vars:
+            logger.info("Extra variables for temporal models: %s", _fh_extra_vars)
+
         # Regime detection
         try:
             cache, _regime_detector = detect_regimes_and_breaks(cache)
@@ -404,7 +413,10 @@ Examples:
 
         # Standard forecasting (initial model fitting)
         try:
-            cache, forecast_result = run_forecasting(cache)
+            cache, forecast_result = run_forecasting(
+                cache,
+                extra_variables=_fh_extra_vars,
+            )
             logger.info("Forecasting complete")
         except Exception as exc:
             logger.warning("Forecasting failed: %s", exc)
@@ -416,6 +428,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
+                extra_variables=_fh_extra_vars,
             )
             logger.info("Forward pass complete: %d steps", forward_pass_result.total_days)
         except Exception as exc:
@@ -427,6 +440,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
+                extra_variables=_fh_extra_vars,
             )
             logger.info(
                 "Burn-out complete: %d iterations, converged=%s",
@@ -463,19 +477,48 @@ Examples:
 
     from operator1.report.profile_builder import build_company_profile
 
-    # Convert fh_result to dict for profile builder
-    fh_dict = None
-    if fh_result is not None:
-        from dataclasses import asdict as _asdict
-        try:
-            fh_dict = _asdict(fh_result)
-        except Exception:
-            fh_dict = fh_result.__dict__.copy() if hasattr(fh_result, "__dict__") else None
+    # Helper to convert dataclass results to dicts for profile builder
+    from dataclasses import asdict as _asdict
+
+    def _to_dict(obj):
+        """Convert a dataclass or dict-like object to a plain dict."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "__dataclass_fields__"):
+            try:
+                return _asdict(obj)
+            except Exception:
+                pass
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__.copy()
+        return None
+
+    fh_dict = _to_dict(fh_result)
+
+    # Convert all model results to dicts, adding "available": True marker
+    def _available_dict(obj):
+        d = _to_dict(obj)
+        if d is not None:
+            d.setdefault("available", True)
+        return d
 
     try:
         profile = build_company_profile(
             verified_target=target_profile,
             cache=cache,
+            forecast_result=forecast_result,
+            mc_result=mc_result,
+            prediction_result=pred_result,
+            graph_risk_result=_available_dict(graph_risk_result),
+            game_theory_result=_available_dict(game_theory_result),
+            fuzzy_protection_result=_available_dict(fuzzy_result),
+            pid_summary=(
+                getattr(forward_pass_result, "pid_summary", None)
+                if forward_pass_result is not None
+                else None
+            ),
             financial_health_result=fh_dict,
         )
         # Save profile

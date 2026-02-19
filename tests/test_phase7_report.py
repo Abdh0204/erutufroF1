@@ -241,6 +241,7 @@ class TestProfileBuilder(unittest.TestCase):
             "monte_carlo", "model_metrics", "data_quality",
             "estimation", "failed_modules", "filters",
             "graph_risk", "game_theory", "fuzzy_protection", "pid_controller",
+            "financial_health",
         }
         self.assertEqual(set(profile.keys()), expected_keys)
 
