@@ -622,6 +622,105 @@ def _build_financial_health_section(
 
 
 # ---------------------------------------------------------------------------
+# Sentiment section
+# ---------------------------------------------------------------------------
+
+
+def _build_sentiment_section(
+    cache: pd.DataFrame | None,
+    sentiment_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build news sentiment section."""
+    section: dict[str, Any] = {"available": False}
+
+    if sentiment_result:
+        section = {
+            "available": True,
+            "n_articles_scored": sentiment_result.get("n_articles_scored", 0),
+            "scoring_method": sentiment_result.get("scoring_method", "none"),
+            "mean_sentiment": _safe_float(sentiment_result.get("mean_sentiment")),
+            "latest_sentiment": _safe_float(sentiment_result.get("latest_sentiment")),
+            "latest_label": sentiment_result.get("latest_label", "Unknown"),
+        }
+
+    if cache is not None and "sentiment_score" in cache.columns:
+        section.setdefault("series_summary", {})["sentiment_score"] = _series_summary(cache["sentiment_score"])
+        if not section.get("available"):
+            section["available"] = True
+
+    return section
+
+
+# ---------------------------------------------------------------------------
+# Peer ranking section
+# ---------------------------------------------------------------------------
+
+
+def _build_peer_ranking_section(
+    cache: pd.DataFrame | None,
+    peer_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build peer percentile ranking section."""
+    section: dict[str, Any] = {"available": False}
+
+    if peer_result:
+        section = {
+            "available": True,
+            "n_peers": peer_result.get("n_peers", 0),
+            "n_variables_ranked": peer_result.get("n_variables_ranked", 0),
+            "latest_composite_rank": _safe_float(peer_result.get("latest_composite_rank")),
+            "latest_label": peer_result.get("latest_label", "Unknown"),
+            "variable_ranks": {
+                k: _safe_float(v)
+                for k, v in (peer_result.get("variable_ranks") or {}).items()
+            },
+        }
+
+    if cache is not None and "peer_rank_composite" in cache.columns:
+        section.setdefault("series_summary", {})["peer_rank_composite"] = _series_summary(
+            cache["peer_rank_composite"]
+        )
+        if not section.get("available"):
+            section["available"] = True
+
+    return section
+
+
+# ---------------------------------------------------------------------------
+# Macro quadrant section
+# ---------------------------------------------------------------------------
+
+
+def _build_macro_quadrant_section(
+    cache: pd.DataFrame | None,
+    macro_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build macro quadrant classification section."""
+    section: dict[str, Any] = {"available": False}
+
+    if macro_result:
+        section = {
+            "available": True,
+            "current_quadrant": macro_result.get("current_quadrant", "unknown"),
+            "quadrant_distribution": macro_result.get("quadrant_distribution", {}),
+            "n_transitions": macro_result.get("n_transitions", 0),
+            "growth_trend": _safe_float(macro_result.get("growth_trend")),
+            "inflation_target": _safe_float(macro_result.get("inflation_target")),
+            "n_days_classified": macro_result.get("n_days_classified", 0),
+        }
+
+    if cache is not None and "macro_quadrant" in cache.columns:
+        vc = cache["macro_quadrant"].value_counts(normalize=True)
+        section["label_distribution_pct"] = {
+            str(k): round(float(v), 4) for k, v in vc.items()
+        }
+        if not section.get("available"):
+            section["available"] = True
+
+    return section
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -644,6 +743,9 @@ def build_company_profile(
     fuzzy_protection_result: dict[str, Any] | None = None,
     pid_summary: dict[str, Any] | None = None,
     financial_health_result: dict[str, Any] | None = None,
+    sentiment_result: dict[str, Any] | None = None,
+    peer_ranking_result: dict[str, Any] | None = None,
+    macro_quadrant_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the comprehensive company profile JSON.
 
@@ -728,6 +830,9 @@ def build_company_profile(
         "fuzzy_protection": fuzzy_protection_result if fuzzy_protection_result else {"available": False},
         "pid_controller": pid_summary if pid_summary else {"available": False},
         "financial_health": _build_financial_health_section(cache, financial_health_result),
+        "sentiment": _build_sentiment_section(cache, sentiment_result),
+        "peer_ranking": _build_peer_ranking_section(cache, peer_ranking_result),
+        "macro_quadrant": _build_macro_quadrant_section(cache, macro_quadrant_result),
         "data_quality": _build_data_quality_section(quality_report_path),
         "estimation": _build_estimation_section(estimation_coverage_path),
         "failed_modules": _build_failed_modules_section(

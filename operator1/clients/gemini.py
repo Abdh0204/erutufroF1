@@ -445,3 +445,79 @@ Generate the complete Bloomberg-style investment report now.
                 "Please review the raw data in the cache artifacts.\n\n"
                 f"Error: {exc}\n"
             )
+
+    # ------------------------------------------------------------------
+    # Sentiment scoring (batch)
+    # ------------------------------------------------------------------
+
+    def score_sentiment(
+        self,
+        headlines: list[str],
+        *,
+        batch_size: int = 500,
+    ) -> list[float]:
+        """Score sentiment for a batch of news headlines.
+
+        Sends all headlines in a single Gemini call (or splits into
+        batches of ``batch_size`` if too many). Returns a list of
+        scores from -1.0 (very bearish) to +1.0 (very bullish).
+
+        Parameters
+        ----------
+        headlines:
+            List of headline strings.
+        batch_size:
+            Maximum headlines per API call.
+
+        Returns
+        -------
+        list[float]
+            Sentiment scores aligned 1:1 with input headlines.
+            Returns empty list on failure.
+        """
+        if not headlines:
+            return []
+
+        all_scores: list[float] = []
+
+        for i in range(0, len(headlines), batch_size):
+            batch = headlines[i:i + batch_size]
+            numbered = "\n".join(
+                f"{j + 1}. {h}" for j, h in enumerate(batch)
+            )
+            prompt = (
+                "Score the sentiment of each financial news headline below "
+                "from -1.0 (very bearish/negative for the stock) to +1.0 "
+                "(very bullish/positive for the stock). 0.0 means neutral.\n\n"
+                "Return ONLY a JSON array of numbers in the same order, "
+                "nothing else. Example: [-0.3, 0.8, 0.0, -0.5]\n\n"
+                f"Headlines:\n{numbered}"
+            )
+
+            try:
+                text = self._generate(prompt)
+                scores = self._parse_json_response(text)
+
+                if isinstance(scores, list) and len(scores) == len(batch):
+                    # Validate all are numbers in [-1, 1]
+                    validated = []
+                    for s in scores:
+                        try:
+                            val = float(s)
+                            validated.append(max(-1.0, min(1.0, val)))
+                        except (TypeError, ValueError):
+                            validated.append(0.0)
+                    all_scores.extend(validated)
+                else:
+                    logger.warning(
+                        "Gemini sentiment: expected %d scores, got %s",
+                        len(batch),
+                        type(scores).__name__,
+                    )
+                    all_scores.extend([0.0] * len(batch))
+
+            except Exception as exc:
+                logger.warning("Gemini sentiment scoring failed: %s", exc)
+                all_scores.extend([0.0] * len(batch))
+
+        return all_scores

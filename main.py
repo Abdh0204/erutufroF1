@@ -367,6 +367,75 @@ Examples:
         logger.warning("Financial health scoring failed: %s", exc)
 
     # ------------------------------------------------------------------
+    # Step 5e: News sentiment scoring
+    # ------------------------------------------------------------------
+    sentiment_result = None
+    try:
+        from operator1.features.news_sentiment import compute_news_sentiment
+
+        # Create Gemini client for sentiment if not already available
+        _gemini_for_sentiment = None
+        if not args.skip_linked:
+            try:
+                from operator1.clients.gemini import GeminiClient as _GC
+                _gemini_for_sentiment = _GC(api_key=gemini_key)
+            except Exception:
+                pass
+
+        cache, sentiment_result = compute_news_sentiment(
+            cache,
+            fmp_client=fmp_client,
+            gemini_client=_gemini_for_sentiment,
+            symbol=args.symbol,
+        )
+        logger.info(
+            "News sentiment: %d articles, method=%s, latest=%.3f (%s)",
+            sentiment_result.n_articles_scored,
+            sentiment_result.scoring_method,
+            sentiment_result.latest_sentiment,
+            sentiment_result.latest_label,
+        )
+    except Exception as exc:
+        logger.warning("News sentiment scoring failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 5f: Peer percentile ranking
+    # ------------------------------------------------------------------
+    peer_result = None
+    try:
+        from operator1.features.peer_ranking import compute_peer_ranking
+        cache, peer_result = compute_peer_ranking(
+            cache,
+            linked_caches=cache_result.linked_daily,
+        )
+        logger.info(
+            "Peer ranking: %d peers, composite=%.1f (%s)",
+            peer_result.n_peers,
+            peer_result.latest_composite_rank,
+            peer_result.latest_label,
+        )
+    except Exception as exc:
+        logger.warning("Peer percentile ranking failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 5g: Macro quadrant mapping
+    # ------------------------------------------------------------------
+    macro_quadrant_result = None
+    try:
+        from operator1.features.macro_quadrant import compute_macro_quadrant
+        cache, macro_quadrant_result = compute_macro_quadrant(
+            cache,
+            macro_data=macro_data,
+        )
+        logger.info(
+            "Macro quadrant: %s, %d transitions",
+            macro_quadrant_result.current_quadrant,
+            macro_quadrant_result.n_transitions,
+        )
+    except Exception as exc:
+        logger.warning("Macro quadrant mapping failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Step 6: Temporal modeling (optional)
     # ------------------------------------------------------------------
     forecast_result = None
@@ -388,14 +457,16 @@ Examples:
         from operator1.models.monte_carlo import run_monte_carlo
         from operator1.models.prediction_aggregator import run_prediction_aggregation
 
-        # Collect fh_* columns that temporal models should also learn from.
-        # These were injected by Step 5d (financial health scoring).
-        _fh_extra_vars = [
+        # Collect ALL injected feature columns for temporal model learning
+        # (fh_*, sentiment_*, peer_*, macro_* from Steps 5d-5g)
+        _extra_vars = [
             c for c in cache.columns
-            if c.startswith("fh_") and cache[c].dtype in ("float64", "float32", "int64")
+            if (c.startswith("fh_") or c.startswith("sentiment_")
+                or c.startswith("peer_") or c.startswith("macro_"))
+            and cache[c].dtype in ("float64", "float32", "int64")
         ]
-        if _fh_extra_vars:
-            logger.info("Extra variables for temporal models: %s", _fh_extra_vars)
+        if _extra_vars:
+            logger.info("Extra variables for temporal models (%d): %s", len(_extra_vars), _extra_vars[:10])
 
         # Regime detection
         try:
@@ -408,7 +479,7 @@ Examples:
         try:
             cache, forecast_result = run_forecasting(
                 cache,
-                extra_variables=_fh_extra_vars,
+                extra_variables=_extra_vars,
             )
             logger.info("Forecasting complete")
         except Exception as exc:
@@ -421,7 +492,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
-                extra_variables=_fh_extra_vars,
+                extra_variables=_extra_vars,
             )
             logger.info("Forward pass complete: %d steps", forward_pass_result.total_days)
         except Exception as exc:
@@ -433,7 +504,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
-                extra_variables=_fh_extra_vars,
+                extra_variables=_extra_vars,
             )
             logger.info(
                 "Burn-out complete: %d iterations, converged=%s",
@@ -489,6 +560,9 @@ Examples:
         return None
 
     fh_dict = _to_dict(fh_result)
+    sentiment_dict = _to_dict(sentiment_result)
+    peer_dict = _to_dict(peer_result)
+    macro_q_dict = _to_dict(macro_quadrant_result)
 
     # Convert all model results to dicts, adding "available": True marker
     def _available_dict(obj):
@@ -513,6 +587,9 @@ Examples:
                 else None
             ),
             financial_health_result=fh_dict,
+            sentiment_result=sentiment_dict,
+            peer_ranking_result=peer_dict,
+            macro_quadrant_result=macro_q_dict,
         )
         # Save profile
         profile_path = Path(args.output_dir) / "company_profile.json"
