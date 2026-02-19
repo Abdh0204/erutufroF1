@@ -132,6 +132,24 @@ _FALLBACK_TEMPLATE = """\
 
 ---
 
+## 10e. News Sentiment Analysis
+
+{sentiment_analysis}
+
+---
+
+## 10f. Peer Ranking & Relative Positioning
+
+{peer_ranking}
+
+---
+
+## 10g. Macro Environment Quadrant
+
+{macro_quadrant}
+
+---
+
 ## 11. Risk Factors & Limitations
 
 {risk_assessment}
@@ -1002,6 +1020,104 @@ def _build_pid_section(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_sentiment_analysis_section(profile: dict[str, Any]) -> str:
+    """Build News Sentiment Analysis section."""
+    sent = profile.get("sentiment", {})
+    if not sent.get("available"):
+        return "*News sentiment analysis not available for this run.*"
+
+    lines = [
+        "News sentiment was scored across recent stock-related articles to capture "
+        "market perception and information-driven price movements.",
+        "",
+        f"- **Articles scored**: {sent.get('n_articles_scored', 0)}",
+        f"- **Scoring method**: {sent.get('scoring_method', 'N/A')}",
+        f"- **Mean sentiment**: {_fmt(sent.get('mean_sentiment'))} *(range: -1.0 bearish to +1.0 bullish)*",
+        f"- **Latest sentiment**: {_fmt(sent.get('latest_sentiment'))} ({sent.get('latest_label', 'N/A')})",
+        "",
+    ]
+
+    summary = sent.get("series_summary", {}).get("sentiment_score", {})
+    if summary:
+        lines.append("### Sentiment Time Series Summary")
+        lines.append("")
+        lines.append(f"- **Min**: {_fmt(summary.get('min'))}")
+        lines.append(f"- **Max**: {_fmt(summary.get('max'))}")
+        lines.append(f"- **Median**: {_fmt(summary.get('median'))}")
+        lines.append(f"- **Observed days**: {summary.get('n_observed', 0)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_peer_ranking_section(profile: dict[str, Any]) -> str:
+    """Build Peer Ranking & Relative Positioning section."""
+    pr = profile.get("peer_ranking", {})
+    if not pr.get("available"):
+        return "*Peer ranking not available (no linked entities or insufficient data).*"
+
+    lines = [
+        "The target company is ranked against its peers on key financial metrics. "
+        "A rank of 50 means at the peer median; higher is better.",
+        "",
+        f"- **Number of peers**: {pr.get('n_peers', 0)}",
+        f"- **Variables ranked**: {pr.get('n_variables_ranked', 0)}",
+        f"- **Composite rank**: {_fmt(pr.get('latest_composite_rank'))} ({pr.get('latest_label', 'N/A')})",
+        "",
+    ]
+
+    var_ranks = pr.get("variable_ranks", {})
+    if var_ranks:
+        lines.append("### Variable Rankings (latest)")
+        lines.append("")
+        lines.append("| Variable | Percentile |")
+        lines.append("|----------|-----------|")
+        for var, rank in sorted(var_ranks.items(), key=lambda x: x[1] or 0, reverse=True):
+            lines.append(f"| {var} | {_fmt(rank, '.0f')} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_macro_quadrant_section(profile: dict[str, Any]) -> str:
+    """Build Macro Environment Quadrant section."""
+    mq = profile.get("macro_quadrant", {})
+    if not mq.get("available"):
+        return "*Macro quadrant classification not available (insufficient macro data).*"
+
+    quadrant_descriptions = {
+        "goldilocks": "Growth above trend, inflation below target -- favorable environment",
+        "reflation": "Growth above trend, inflation above target -- expansionary but inflationary",
+        "stagflation": "Growth below trend, inflation above target -- challenging environment",
+        "deflation": "Growth below trend, inflation below target -- contractionary",
+    }
+
+    current = mq.get("current_quadrant", "unknown")
+    desc = quadrant_descriptions.get(current, "Unknown classification")
+
+    lines = [
+        "The macro environment is classified into four quadrants based on GDP growth "
+        "relative to trend and inflation relative to central bank targets.",
+        "",
+        f"- **Current quadrant**: **{current.upper()}** -- {desc}",
+        f"- **GDP growth trend**: {_fmt(mq.get('growth_trend'))}%",
+        f"- **Inflation target**: {_fmt(mq.get('inflation_target'))}%",
+        f"- **Days classified**: {mq.get('n_days_classified', 0)}",
+        f"- **Quadrant transitions**: {mq.get('n_transitions', 0)}",
+        "",
+    ]
+
+    dist = mq.get("quadrant_distribution", {})
+    if dist:
+        lines.append("### Quadrant Distribution (over analysis window)")
+        lines.append("")
+        for q, pct in sorted(dist.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"- **{q.title()}**: {pct*100:.1f}%")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _build_appendix(profile: dict[str, Any]) -> str:
     """Build the Appendix section (Section 13)."""
     lines: list[str] = []
@@ -1158,6 +1274,9 @@ def _build_fallback_report(profile: dict[str, Any]) -> str:
         game_theory=_build_game_theory_section(profile),
         fuzzy_protection=_build_fuzzy_protection_section(profile),
         pid_controller=_build_pid_section(profile),
+        sentiment_analysis=_build_sentiment_analysis_section(profile),
+        peer_ranking=_build_peer_ranking_section(profile),
+        macro_quadrant=_build_macro_quadrant_section(profile),
         risk_assessment=_build_risk_assessment(profile),
         limitations=_build_limitations(profile),
         investment_recommendation=_build_investment_recommendation(profile),
