@@ -753,7 +753,11 @@ class TestRunForecasting(unittest.TestCase):
             ["nonexistent_var_1", "nonexistent_var_2"],
             enable_burnout=False,
         )
-        self.assertEqual(len(result.forecasts), 0)
+        # The requested variables don't exist, so they produce no forecasts.
+        # However, GARCH on return_1d always runs as a special case and may
+        # produce a volatility_garch entry.
+        for var in ["nonexistent_var_1", "nonexistent_var_2"]:
+            self.assertNotIn(var, result.forecasts)
 
     def test_default_variables_from_config(self):
         """When variables=None, should load from survival hierarchy."""

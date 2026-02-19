@@ -218,6 +218,10 @@ guaranteed coverage -- not Gaussian assumptions)
 - Dynamic Time Warping (DTW) historical analogs ("the last time this pattern occurred was...")
 - Regime detection and structural break analysis
 - Linked variables (sector, industry, competitors, macro from World Bank)
+- Financial health composite scoring (0-100 scale across 5 tiers)
+- News sentiment analysis (AI-scored from recent stock news articles)
+- Peer percentile ranking (target vs peer group on all key metrics)
+- Macro environment quadrant classification (goldilocks/reflation/stagflation/deflation)
 
 Your task is to generate a professional investment report that synthesizes \
 this information into actionable insights for sophisticated investors.
@@ -263,11 +267,21 @@ REPORT STRUCTURE (MUST INCLUDE ALL 13 SECTIONS):
    - What vanity spending reveals about management discipline
 
 6. LINKED VARIABLES & MARKET CONTEXT
+   - **Peer Ranking**: percentile rank of target vs peer group on key metrics. \
+A composite rank above 60 = above average; below 40 = below average. Show the top \
+variable rankings in a table. Explain what relative positioning means for investors.
    - Sector performance: relative strength vs sector median
    - Industry positioning: valuation premium/discount vs industry
    - Competitor health assessment: how does the company compare?
    - Supply chain risk analysis (if applicable)
-   - Macro environment from World Bank indicators (inflation, GDP, unemployment, FX)
+   - **Macro Environment Quadrant**: classify as Goldilocks (growth + low inflation), \
+Reflation (growth + high inflation), Stagflation (low growth + high inflation), or \
+Deflation (low growth + low inflation). Explain how the current quadrant affects this stock. \
+Show the quadrant distribution over the analysis window.
+   - **News Sentiment**: summarize AI-scored sentiment from recent news articles. \
+Include mean sentiment, latest reading, and momentum trend. \
+Explain what the sentiment trajectory means for near-term price action.
+   - Macro indicators from World Bank (inflation, GDP, unemployment, FX)
 
 7. TEMPORAL ANALYSIS & MODEL INSIGHTS
    - Current market regime and regime distribution over 2 years
@@ -445,3 +459,79 @@ Generate the complete Bloomberg-style investment report now.
                 "Please review the raw data in the cache artifacts.\n\n"
                 f"Error: {exc}\n"
             )
+
+    # ------------------------------------------------------------------
+    # Sentiment scoring (batch)
+    # ------------------------------------------------------------------
+
+    def score_sentiment(
+        self,
+        headlines: list[str],
+        *,
+        batch_size: int = 500,
+    ) -> list[float]:
+        """Score sentiment for a batch of news headlines.
+
+        Sends all headlines in a single Gemini call (or splits into
+        batches of ``batch_size`` if too many). Returns a list of
+        scores from -1.0 (very bearish) to +1.0 (very bullish).
+
+        Parameters
+        ----------
+        headlines:
+            List of headline strings.
+        batch_size:
+            Maximum headlines per API call.
+
+        Returns
+        -------
+        list[float]
+            Sentiment scores aligned 1:1 with input headlines.
+            Returns empty list on failure.
+        """
+        if not headlines:
+            return []
+
+        all_scores: list[float] = []
+
+        for i in range(0, len(headlines), batch_size):
+            batch = headlines[i:i + batch_size]
+            numbered = "\n".join(
+                f"{j + 1}. {h}" for j, h in enumerate(batch)
+            )
+            prompt = (
+                "Score the sentiment of each financial news headline below "
+                "from -1.0 (very bearish/negative for the stock) to +1.0 "
+                "(very bullish/positive for the stock). 0.0 means neutral.\n\n"
+                "Return ONLY a JSON array of numbers in the same order, "
+                "nothing else. Example: [-0.3, 0.8, 0.0, -0.5]\n\n"
+                f"Headlines:\n{numbered}"
+            )
+
+            try:
+                text = self._generate(prompt)
+                scores = self._parse_json_response(text)
+
+                if isinstance(scores, list) and len(scores) == len(batch):
+                    # Validate all are numbers in [-1, 1]
+                    validated = []
+                    for s in scores:
+                        try:
+                            val = float(s)
+                            validated.append(max(-1.0, min(1.0, val)))
+                        except (TypeError, ValueError):
+                            validated.append(0.0)
+                    all_scores.extend(validated)
+                else:
+                    logger.warning(
+                        "Gemini sentiment: expected %d scores, got %s",
+                        len(batch),
+                        type(scores).__name__,
+                    )
+                    all_scores.extend([0.0] * len(batch))
+
+            except Exception as exc:
+                logger.warning("Gemini sentiment scoring failed: %s", exc)
+                all_scores.extend([0.0] * len(batch))
+
+        return all_scores

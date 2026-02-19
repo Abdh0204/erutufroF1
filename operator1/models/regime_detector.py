@@ -198,11 +198,14 @@ class RegimeDetector:
             self._result.hmm_probs = probs
             self._result.hmm_fitted = True
 
+            # ConvergenceMonitor is an object, not a dict; use getattr.
+            monitor = getattr(model, "monitor_", None)
+            converged = getattr(monitor, "converged", "unknown") if monitor is not None else "unknown"
             logger.info(
                 "HMM fit: %d regimes, %d observations, converged=%s",
                 self.n_regimes,
                 len(X_clean),
-                getattr(model, "monitor_", {}).get("converged", "unknown"),
+                converged,
             )
             return regimes, probs
 

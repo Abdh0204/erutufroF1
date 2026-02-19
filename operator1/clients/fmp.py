@@ -173,3 +173,43 @@ class FMPClient:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
             df = df.sort_values("date").reset_index(drop=True)
         return df
+
+    # ------------------------------------------------------------------
+    # Stock news (for sentiment analysis)
+    # ------------------------------------------------------------------
+
+    def get_stock_news(
+        self,
+        symbol: str,
+        limit: int = 1000,
+    ) -> pd.DataFrame:
+        """Fetch stock news articles for *symbol*.
+
+        Parameters
+        ----------
+        symbol:
+            Trading symbol (e.g. ``AAPL``).
+        limit:
+            Maximum number of articles to return (default 1000).
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``title``, ``text``, ``publishedDate``, ``site``, ``url``.
+            Sorted by date ascending.
+        """
+        try:
+            data = self._get(f"/stock_news?tickers={symbol}&limit={limit}")
+        except Exception as exc:
+            logger.warning("Failed to fetch stock news for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        if not isinstance(data, list):
+            data = data.get("data", []) if isinstance(data, dict) else []
+        df = pd.DataFrame(data)
+        if df.empty:
+            return df
+        if "publishedDate" in df.columns:
+            df["publishedDate"] = pd.to_datetime(df["publishedDate"], errors="coerce")
+            df = df.sort_values("publishedDate").reset_index(drop=True)
+        return df

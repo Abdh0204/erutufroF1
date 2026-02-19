@@ -1368,6 +1368,7 @@ def run_forecasting(
     cache: pd.DataFrame,
     variables: list[str] | None = None,
     *,
+    extra_variables: list[str] | None = None,
     random_state: int = 42,
     enable_burnout: bool = True,
 ) -> tuple[pd.DataFrame, ForecastResult]:
@@ -1411,6 +1412,15 @@ def run_forecasting(
                 seen.add(v)
                 unique_vars.append(v)
         variables = unique_vars
+
+    # Append extra variables (e.g. financial health scores) so they get
+    # forecasted alongside the tier variables.
+    if extra_variables:
+        seen = set(variables)
+        for ev in extra_variables:
+            if ev not in seen and ev in cache.columns:
+                variables.append(ev)
+                seen.add(ev)
 
     # Filter to columns actually present in cache.
     available_vars = [v for v in variables if v in cache.columns]
@@ -2546,6 +2556,7 @@ def run_forward_pass(
     hierarchy_weights: dict[str, float] | None = None,
     regime_labels: pd.Series | None = None,
     *,
+    extra_variables: list[str] | None = None,
     warmup_days: int = 60,
     log_interval: int = 50,
     random_state: int = 42,
@@ -2604,6 +2615,15 @@ def run_forward_pass(
             if v in cache.columns and v not in var_to_tier:
                 all_vars.append(v)
                 var_to_tier[v] = tier_num
+
+    # Include extra variables (e.g. financial health scores) so the
+    # forward pass also learns from / tracks them day-by-day.
+    # Extra variables are assigned tier 0 (cross-tier composite).
+    if extra_variables:
+        for ev in extra_variables:
+            if ev in cache.columns and ev not in var_to_tier:
+                all_vars.append(ev)
+                var_to_tier[ev] = 0
 
     if not all_vars:
         logger.warning("No tier variables found in cache for forward pass")
@@ -2753,6 +2773,7 @@ def run_burnout(
     hierarchy_weights: dict[str, float] | None = None,
     regime_labels: pd.Series | None = None,
     *,
+    extra_variables: list[str] | None = None,
     burnout_window: int = 130,
     max_iterations: int = 10,
     patience: int = 3,
@@ -2826,6 +2847,7 @@ def run_burnout(
             tier_variables=tier_variables,
             hierarchy_weights=hierarchy_weights,
             regime_labels=regime_labels.iloc[-actual_window:] if regime_labels is not None and len(regime_labels) >= actual_window else None,
+            extra_variables=extra_variables,
             warmup_days=min(burnout_warmup, actual_window - validation_days - 1),
             log_interval=999,  # suppress inner logging
             random_state=random_state + iteration,

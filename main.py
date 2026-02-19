@@ -225,16 +225,9 @@ Examples:
             logger.warning("Graph risk analysis failed: %s", exc)
 
         # Step 3c: Game Theory competitive dynamics
+        # NOTE: Deferred to Step 5c when the full cache is available.
+        # The placeholder pd.DataFrame() call was a bug (pd not imported).
         game_theory_result = None
-        try:
-            from operator1.models.game_theory import analyze_competitive_dynamics
-            game_theory_result = analyze_competitive_dynamics(
-                target_cache=pd.DataFrame(),  # populated after cache build
-                target_name=target_profile.get("name", "target"),
-            )
-            logger.info("Game theory: placeholder (full analysis after cache build)")
-        except Exception as exc:
-            logger.warning("Game theory analysis failed: %s", exc)
     else:
         logger.info("Step 3: Skipped (--skip-linked)")
         graph_risk_result = None
@@ -355,6 +348,94 @@ Examples:
             logger.warning("Game theory analysis failed: %s", exc)
 
     # ------------------------------------------------------------------
+    # Step 5d: Financial health scores (injected into cache for temporal learning)
+    # ------------------------------------------------------------------
+    fh_result = None
+    try:
+        from operator1.models.financial_health import compute_financial_health
+        cache, fh_result = compute_financial_health(
+            cache,
+            hierarchy_weights=weights,
+        )
+        logger.info(
+            "Financial health: composite=%.1f (%s), %d columns added",
+            fh_result.latest_composite,
+            fh_result.latest_label,
+            len(fh_result.columns_added),
+        )
+    except Exception as exc:
+        logger.warning("Financial health scoring failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 5e: News sentiment scoring
+    # ------------------------------------------------------------------
+    sentiment_result = None
+    try:
+        from operator1.features.news_sentiment import compute_news_sentiment
+
+        # Create Gemini client for sentiment if not already available
+        _gemini_for_sentiment = None
+        if not args.skip_linked:
+            try:
+                from operator1.clients.gemini import GeminiClient as _GC
+                _gemini_for_sentiment = _GC(api_key=gemini_key)
+            except Exception:
+                pass
+
+        cache, sentiment_result = compute_news_sentiment(
+            cache,
+            fmp_client=fmp_client,
+            gemini_client=_gemini_for_sentiment,
+            symbol=args.symbol,
+        )
+        logger.info(
+            "News sentiment: %d articles, method=%s, latest=%.3f (%s)",
+            sentiment_result.n_articles_scored,
+            sentiment_result.scoring_method,
+            sentiment_result.latest_sentiment,
+            sentiment_result.latest_label,
+        )
+    except Exception as exc:
+        logger.warning("News sentiment scoring failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 5f: Peer percentile ranking
+    # ------------------------------------------------------------------
+    peer_result = None
+    try:
+        from operator1.features.peer_ranking import compute_peer_ranking
+        cache, peer_result = compute_peer_ranking(
+            cache,
+            linked_caches=cache_result.linked_daily,
+        )
+        logger.info(
+            "Peer ranking: %d peers, composite=%.1f (%s)",
+            peer_result.n_peers,
+            peer_result.latest_composite_rank,
+            peer_result.latest_label,
+        )
+    except Exception as exc:
+        logger.warning("Peer percentile ranking failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 5g: Macro quadrant mapping
+    # ------------------------------------------------------------------
+    macro_quadrant_result = None
+    try:
+        from operator1.features.macro_quadrant import compute_macro_quadrant
+        cache, macro_quadrant_result = compute_macro_quadrant(
+            cache,
+            macro_data=macro_data,
+        )
+        logger.info(
+            "Macro quadrant: %s, %d transitions",
+            macro_quadrant_result.current_quadrant,
+            macro_quadrant_result.n_transitions,
+        )
+    except Exception as exc:
+        logger.warning("Macro quadrant mapping failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Step 6: Temporal modeling (optional)
     # ------------------------------------------------------------------
     forecast_result = None
@@ -376,6 +457,17 @@ Examples:
         from operator1.models.monte_carlo import run_monte_carlo
         from operator1.models.prediction_aggregator import run_prediction_aggregation
 
+        # Collect ALL injected feature columns for temporal model learning
+        # (fh_*, sentiment_*, peer_*, macro_* from Steps 5d-5g)
+        _extra_vars = [
+            c for c in cache.columns
+            if (c.startswith("fh_") or c.startswith("sentiment_")
+                or c.startswith("peer_") or c.startswith("macro_"))
+            and cache[c].dtype in ("float64", "float32", "int64")
+        ]
+        if _extra_vars:
+            logger.info("Extra variables for temporal models (%d): %s", len(_extra_vars), _extra_vars[:10])
+
         # Regime detection
         try:
             cache, _regime_detector = detect_regimes_and_breaks(cache)
@@ -385,7 +477,10 @@ Examples:
 
         # Standard forecasting (initial model fitting)
         try:
-            cache, forecast_result = run_forecasting(cache)
+            cache, forecast_result = run_forecasting(
+                cache,
+                extra_variables=_extra_vars,
+            )
             logger.info("Forecasting complete")
         except Exception as exc:
             logger.warning("Forecasting failed: %s", exc)
@@ -397,6 +492,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
+                extra_variables=_extra_vars,
             )
             logger.info("Forward pass complete: %d steps", forward_pass_result.total_days)
         except Exception as exc:
@@ -408,6 +504,7 @@ Examples:
                 cache,
                 hierarchy_weights=weights,
                 regime_labels=regime_labels,
+                extra_variables=_extra_vars,
             )
             logger.info(
                 "Burn-out complete: %d iterations, converged=%s",
@@ -444,10 +541,55 @@ Examples:
 
     from operator1.report.profile_builder import build_company_profile
 
+    # Helper to convert dataclass results to dicts for profile builder
+    from dataclasses import asdict as _asdict
+
+    def _to_dict(obj):
+        """Convert a dataclass or dict-like object to a plain dict."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "__dataclass_fields__"):
+            try:
+                return _asdict(obj)
+            except Exception:
+                pass
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__.copy()
+        return None
+
+    fh_dict = _to_dict(fh_result)
+    sentiment_dict = _to_dict(sentiment_result)
+    peer_dict = _to_dict(peer_result)
+    macro_q_dict = _to_dict(macro_quadrant_result)
+
+    # Convert all model results to dicts, adding "available": True marker
+    def _available_dict(obj):
+        d = _to_dict(obj)
+        if d is not None:
+            d.setdefault("available", True)
+        return d
+
     try:
         profile = build_company_profile(
             verified_target=target_profile,
             cache=cache,
+            forecast_result=forecast_result,
+            mc_result=mc_result,
+            prediction_result=pred_result,
+            graph_risk_result=_available_dict(graph_risk_result),
+            game_theory_result=_available_dict(game_theory_result),
+            fuzzy_protection_result=_available_dict(fuzzy_result),
+            pid_summary=(
+                getattr(forward_pass_result, "pid_summary", None)
+                if forward_pass_result is not None
+                else None
+            ),
+            financial_health_result=fh_dict,
+            sentiment_result=sentiment_dict,
+            peer_ranking_result=peer_dict,
+            macro_quadrant_result=macro_q_dict,
         )
         # Save profile
         profile_path = Path(args.output_dir) / "company_profile.json"
