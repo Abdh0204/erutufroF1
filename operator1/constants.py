@@ -19,6 +19,11 @@ EPSILON: float = 1e-9
 EULERPOOL_BASE_URL: str = "https://api.eulerpool.com"
 
 # ---------------------------------------------------------------------------
+# EOD Historical Data base URL (alternative to Eulerpool)
+# ---------------------------------------------------------------------------
+EOD_BASE_URL: str = "https://eodhd.com/api"
+
+# ---------------------------------------------------------------------------
 # FMP base URL
 # ---------------------------------------------------------------------------
 FMP_BASE_URL: str = "https://financialmodelingprep.com/api/v3"

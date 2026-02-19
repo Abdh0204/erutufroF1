@@ -44,10 +44,15 @@ def _load_dotenv() -> None:
             logger.warning("Failed to parse .env file: %s", exc)
 
 # Required keys -- pipeline will halt if any are missing.
-_REQUIRED_KEYS = ("EULERPOOL_API_KEY", "FMP_API_KEY", "GEMINI_API_KEY")
+# NOTE: EULERPOOL_API_KEY is no longer unconditionally required.
+# Either EULERPOOL_API_KEY or EOD_API_KEY must be present (checked below).
+_REQUIRED_KEYS = ("FMP_API_KEY", "GEMINI_API_KEY")
 
 # Optional keys -- logged as warning if absent.
 _OPTIONAL_KEYS = ("WORLD_BANK_API_KEY",)
+
+# Equity provider keys -- at least one must be present.
+_EQUITY_PROVIDER_KEYS = ("EULERPOOL_API_KEY", "EOD_API_KEY")
 
 
 def _load_from_kaggle() -> dict[str, str]:
@@ -56,7 +61,7 @@ def _load_from_kaggle() -> dict[str, str]:
         from kaggle_secrets import UserSecretsClient  # type: ignore[import-untyped]
         client = UserSecretsClient()
         secrets: dict[str, str] = {}
-        for key in (*_REQUIRED_KEYS, *_OPTIONAL_KEYS):
+        for key in (*_REQUIRED_KEYS, *_OPTIONAL_KEYS, *_EQUITY_PROVIDER_KEYS):
             try:
                 value = client.get_secret(key)
                 if value:
@@ -71,7 +76,7 @@ def _load_from_kaggle() -> dict[str, str]:
 def _load_from_env() -> dict[str, str]:
     """Fallback: read from OS environment variables."""
     secrets: dict[str, str] = {}
-    for key in (*_REQUIRED_KEYS, *_OPTIONAL_KEYS):
+    for key in (*_REQUIRED_KEYS, *_OPTIONAL_KEYS, *_EQUITY_PROVIDER_KEYS):
         value = os.environ.get(key)
         if value:
             secrets[key] = value
@@ -105,6 +110,22 @@ def load_secrets() -> dict[str, str]:
         )
         logger.critical(msg, ", ".join(missing))
         raise SystemExit(msg % ", ".join(missing))
+
+    # At least one equity provider key must be present
+    has_equity_key = any(k in secrets for k in _EQUITY_PROVIDER_KEYS)
+    if not has_equity_key:
+        msg = (
+            "No equity data provider key found. "
+            "Set either EULERPOOL_API_KEY or EOD_API_KEY."
+        )
+        logger.critical(msg)
+        raise SystemExit(msg)
+
+    # Log which equity provider is active
+    if "EULERPOOL_API_KEY" in secrets:
+        logger.info("Equity provider: Eulerpool (EULERPOOL_API_KEY found)")
+    if "EOD_API_KEY" in secrets:
+        logger.info("Equity provider: EOD Historical Data (EOD_API_KEY found)")
 
     # Warn about optional keys
     for key in _OPTIONAL_KEYS:

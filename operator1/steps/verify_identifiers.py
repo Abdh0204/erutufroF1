@@ -11,7 +11,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from operator1.clients.eulerpool import EulerportClient, EulerportAPIError
+from operator1.clients.eulerpool import EulerportAPIError
+from operator1.clients.eod import EODAPIError
+from operator1.clients.equity_provider import EquityProvider
 from operator1.clients.fmp import FMPClient, FMPAPIError
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,7 @@ class VerificationError(Exception):
 def verify_identifiers(
     target_isin: str,
     fmp_symbol: str,
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     fmp_client: FMPClient,
 ) -> VerifiedTarget:
     """Verify both identifiers and return a ``VerifiedTarget``.
@@ -86,7 +88,7 @@ def verify_identifiers(
     logger.info("Verifying ISIN %s via Eulerpool ...", target_isin)
     try:
         profile = eulerpool_client.get_profile(target_isin)
-    except EulerportAPIError as exc:
+    except (EulerportAPIError, EODAPIError) as exc:
         raise VerificationError(
             "Eulerpool",
             f"Invalid ISIN '{target_isin}' or bad API key: {exc}",

@@ -16,7 +16,9 @@ from typing import Any
 
 import pandas as pd
 
-from operator1.clients.eulerpool import EulerportClient, EulerportAPIError
+from operator1.clients.eulerpool import EulerportAPIError
+from operator1.clients.eod import EODAPIError
+from operator1.clients.equity_provider import EquityProvider
 from operator1.clients.fmp import FMPClient, FMPAPIError
 from operator1.config_loader import get_global_config
 from operator1.constants import CACHE_DIR, RAW_CACHE_DIR, DATE_START, DATE_END
@@ -104,7 +106,7 @@ def _read_json(isin: str, name: str) -> Any:
 
 def _fetch_entity_data(
     isin: str,
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     is_target: bool = False,
     force_rebuild: bool = False,
 ) -> EntityData:
@@ -130,7 +132,7 @@ def _fetch_entity_data(
         try:
             entity.profile = eulerpool_client.get_profile(isin)
             _write_json(isin, "profile", entity.profile)
-        except EulerportAPIError as exc:
+        except (EulerportAPIError, EODAPIError) as exc:
             logger.warning("Profile fetch failed for %s: %s", isin, exc)
 
     # Quotes
@@ -141,7 +143,7 @@ def _fetch_entity_data(
             entity.quotes = eulerpool_client.get_quotes(isin)
             if not entity.quotes.empty:
                 _write_df(isin, "quotes", entity.quotes)
-        except EulerportAPIError as exc:
+        except (EulerportAPIError, EODAPIError) as exc:
             logger.warning("Quotes fetch failed for %s: %s", isin, exc)
 
     # Income statement
@@ -152,7 +154,7 @@ def _fetch_entity_data(
             entity.income_statement = eulerpool_client.get_income_statement(isin)
             if not entity.income_statement.empty:
                 _write_df(isin, "income_statement", entity.income_statement)
-        except EulerportAPIError as exc:
+        except (EulerportAPIError, EODAPIError) as exc:
             logger.warning("Income statement fetch failed for %s: %s", isin, exc)
 
     # Balance sheet
@@ -163,7 +165,7 @@ def _fetch_entity_data(
             entity.balance_sheet = eulerpool_client.get_balance_sheet(isin)
             if not entity.balance_sheet.empty:
                 _write_df(isin, "balance_sheet", entity.balance_sheet)
-        except EulerportAPIError as exc:
+        except (EulerportAPIError, EODAPIError) as exc:
             logger.warning("Balance sheet fetch failed for %s: %s", isin, exc)
 
     # Cash-flow statement
@@ -174,7 +176,7 @@ def _fetch_entity_data(
             entity.cashflow_statement = eulerpool_client.get_cashflow_statement(isin)
             if not entity.cashflow_statement.empty:
                 _write_df(isin, "cashflow_statement", entity.cashflow_statement)
-        except EulerportAPIError as exc:
+        except (EulerportAPIError, EODAPIError) as exc:
             logger.warning("Cash-flow statement fetch failed for %s: %s", isin, exc)
 
     # Target-only extras
@@ -186,7 +188,7 @@ def _fetch_entity_data(
             try:
                 entity.peers = eulerpool_client.get_peers(isin)
                 _write_json(isin, "peers", entity.peers)
-            except EulerportAPIError as exc:
+            except (EulerportAPIError, EODAPIError) as exc:
                 logger.warning("Peers fetch failed for %s: %s", isin, exc)
 
         # Supply chain
@@ -196,7 +198,7 @@ def _fetch_entity_data(
             try:
                 entity.supply_chain = eulerpool_client.get_supply_chain(isin)
                 _write_json(isin, "supply_chain", entity.supply_chain)
-            except EulerportAPIError as exc:
+            except (EulerportAPIError, EODAPIError) as exc:
                 logger.warning("Supply chain fetch failed for %s: %s", isin, exc)
 
         # Executives
@@ -206,7 +208,7 @@ def _fetch_entity_data(
             try:
                 entity.executives = eulerpool_client.get_executives(isin)
                 _write_json(isin, "executives", entity.executives)
-            except EulerportAPIError as exc:
+            except (EulerportAPIError, EODAPIError) as exc:
                 logger.warning("Executives fetch failed for %s: %s", isin, exc)
 
     return entity
@@ -260,7 +262,7 @@ def _fetch_fmp_ohlcv(
 def extract_all_data(
     target: VerifiedTarget,
     linked_isins: list[str],
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     fmp_client: FMPClient,
     force_rebuild: bool | None = None,
 ) -> ExtractionResult:

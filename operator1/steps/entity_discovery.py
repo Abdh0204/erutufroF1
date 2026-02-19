@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
 
-from operator1.clients.eulerpool import EulerportClient, EulerportAPIError
+from operator1.clients.eulerpool import EulerportAPIError
+from operator1.clients.eod import EODAPIError
+from operator1.clients.equity_provider import EquityProvider
 from operator1.clients.gemini import GeminiClient
 from operator1.config_loader import get_global_config
 from operator1.constants import CACHE_DIR, MATCH_SCORE_THRESHOLD, SECTOR_PEER_FALLBACK_COUNT
@@ -129,7 +131,7 @@ def _save_progress(progress: dict[str, Any]) -> None:
 def _resolve_entity(
     query: str,
     group: str,
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     target_country: str,
     target_sector: str,
 ) -> LinkedEntity | None:
@@ -139,7 +141,7 @@ def _resolve_entity(
     """
     try:
         candidates = eulerpool_client.search(query)
-    except EulerportAPIError as exc:
+    except (EulerportAPIError, EODAPIError) as exc:
         logger.warning("Search failed for '%s': %s", query, exc)
         return None
 
@@ -180,14 +182,14 @@ def _resolve_entity(
 
 def _fallback_sector_peers(
     target_isin: str,
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     count: int = SECTOR_PEER_FALLBACK_COUNT,
 ) -> list[LinkedEntity]:
     """Fallback when no competitors found: use Eulerpool peers sorted by market cap."""
     logger.info("Competitor fallback: fetching sector peers via Eulerpool ...")
     try:
         peer_isins = eulerpool_client.get_peers(target_isin)
-    except EulerportAPIError as exc:
+    except (EulerportAPIError, EODAPIError) as exc:
         logger.warning("Peer fallback failed: %s", exc)
         return []
 
@@ -207,7 +209,7 @@ def _fallback_sector_peers(
                 match_score=100,  # direct peer, full confidence
                 market_cap=None,
             ))
-        except EulerportAPIError:
+        except (EulerportAPIError, EODAPIError):
             continue
         if len(peers) >= count:
             break
@@ -223,7 +225,7 @@ def _fallback_sector_peers(
 def discover_linked_entities(
     target_isin: str,
     target_profile: dict[str, Any],
-    eulerpool_client: EulerportClient,
+    eulerpool_client: EquityProvider,
     gemini_client: GeminiClient | None = None,
     force_rebuild: bool | None = None,
 ) -> DiscoveryResult:

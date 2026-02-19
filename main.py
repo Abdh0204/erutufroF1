@@ -110,7 +110,6 @@ Examples:
         logger.error("Create a .env file from .env.example with your API keys")
         return 1
 
-    eulerpool_key = secrets["EULERPOOL_API_KEY"]
     fmp_key = secrets["FMP_API_KEY"]
     gemini_key = secrets["GEMINI_API_KEY"]
 
@@ -120,18 +119,18 @@ Examples:
     logger.info("")
     logger.info("Step 1: Verifying identifiers...")
 
-    from operator1.clients.eulerpool import EulerportClient
+    from operator1.clients.equity_provider import create_equity_provider
     from operator1.clients.fmp import FMPClient
     from operator1.steps.verify_identifiers import verify_identifiers
 
-    eulerpool_client = EulerportClient(api_key=eulerpool_key)
+    equity_client = create_equity_provider(secrets)
     fmp_client = FMPClient(api_key=fmp_key)
 
     try:
         verified = verify_identifiers(
             target_isin=args.isin,
             fmp_symbol=args.symbol,
-            eulerpool_client=eulerpool_client,
+            eulerpool_client=equity_client,
             fmp_client=fmp_client,
         )
         logger.info("Verification passed: %s (%s)", verified.name or "?", verified.country or "?")
@@ -200,7 +199,7 @@ Examples:
             relationships = discover_linked_entities(
                 target_profile=target_profile,
                 gemini_client=gemini_client,
-                eulerpool_client=eulerpool_client,
+                eulerpool_client=equity_client,
             )
             total_linked = sum(len(v) for v in relationships.values() if isinstance(v, list))
             logger.info("Linked entities discovered: %d", total_linked)
@@ -262,7 +261,7 @@ Examples:
         raw_data = extract_all_data(
             target=verified,
             linked_isins=linked_isins,
-            eulerpool_client=eulerpool_client,
+            eulerpool_client=equity_client,
             fmp_client=fmp_client,
         )
         logger.info("Raw data extracted")
