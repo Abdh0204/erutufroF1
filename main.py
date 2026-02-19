@@ -225,16 +225,9 @@ Examples:
             logger.warning("Graph risk analysis failed: %s", exc)
 
         # Step 3c: Game Theory competitive dynamics
+        # NOTE: Deferred to Step 5c when the full cache is available.
+        # The placeholder pd.DataFrame() call was a bug (pd not imported).
         game_theory_result = None
-        try:
-            from operator1.models.game_theory import analyze_competitive_dynamics
-            game_theory_result = analyze_competitive_dynamics(
-                target_cache=pd.DataFrame(),  # populated after cache build
-                target_name=target_profile.get("name", "target"),
-            )
-            logger.info("Game theory: placeholder (full analysis after cache build)")
-        except Exception as exc:
-            logger.warning("Game theory analysis failed: %s", exc)
     else:
         logger.info("Step 3: Skipped (--skip-linked)")
         graph_risk_result = None

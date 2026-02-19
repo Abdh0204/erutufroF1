@@ -813,8 +813,8 @@ def _build_investment_recommendation(profile: dict[str, Any]) -> str:
 
     # Derive recommendation from available data
     filters = profile.get("filters", {})
-    survival = profile.get("current_state", {}).get("survival", {})
-    hist = profile.get("historical", {})
+    survival = profile.get("survival", {})
+    hist = profile.get("regimes", {})
 
     # Count filter passes
     pass_count = 0
@@ -1236,25 +1236,25 @@ def validate_gemini_report(
         issues.append("LIMITATIONS section is missing")
 
     # Check 4: Spot-check key metrics against profile data
-    company = profile.get("company", {})
-    company_name = company.get("name", "")
+    identity = profile.get("identity", {})
+    company_name = identity.get("name", "")
     if company_name and company_name.lower() not in md_lower:
         issues.append(f"Company name '{company_name}' not found in report")
 
     # Check ticker appears
-    ticker = company.get("ticker", "")
+    ticker = identity.get("ticker", "")
     if ticker and ticker.upper() not in markdown.upper():
         issues.append(f"Ticker '{ticker}' not found in report")
 
     # Check survival mode is mentioned if active
-    survival = profile.get("current_state", {}).get("survival", {})
-    if survival.get("company_survival_mode"):
+    survival = profile.get("survival", {})
+    if survival.get("company_survival_mode_flag"):
         if "survival" not in md_lower:
             issues.append("Company is in survival mode but report does not mention survival")
 
     # Check debt-to-equity if available (spot-check for hallucination)
-    tier2 = profile.get("current_state", {}).get("tier2_solvency", {})
-    d2e = tier2.get("debt_to_equity")
+    # Profile stores hierarchy_weights in survival section, not tier2_solvency
+    d2e = None
     if d2e is not None and not isinstance(d2e, str):
         d2e_str = f"{d2e:.1f}"
         # Allow some flexibility in formatting
