@@ -13,9 +13,18 @@ three related variables are observed:
   - ``ebit = revenue - operating_expenses`` (if available)
 
 **Pass 2 -- Regime-weighted rolling imputer:**
-For each variable with remaining nulls, trains a ``BayesianRidge``
-model on observed data up to day ``t`` (no look-ahead), weighted by
-the survival hierarchy tier the variable belongs to.
+For each variable with remaining nulls, trains a model on observed
+data up to day ``t`` (no look-ahead), weighted by the survival
+hierarchy tier the variable belongs to.
+
+Two imputer backends are supported (configured via
+``global_config.yml`` key ``estimation_imputer``):
+
+  - ``"bayesian_ridge"`` (default): Per-variable BayesianRidge
+    regression.  Linear, fast, and reliable.
+  - ``"vae"``: Variational Autoencoder that jointly imputes all
+    target variables.  Captures nonlinear cross-variable
+    relationships but adds training overhead.  Requires ``torch``.
 
 Output columns per estimated variable ``x``:
   - ``x_observed``: original observed value (NaN if was missing)
@@ -513,6 +522,134 @@ class EstimationCoverage:
 
 
 # ---------------------------------------------------------------------------
+# Pass 2 backend helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_pass2_bayesian_ridge(
+    result: pd.DataFrame,
+    variables: list[str],
+    tier_membership: dict[str, int],
+    tier_weight_columns: dict[int, str],
+    coverage: EstimationCoverage,
+) -> None:
+    """Run the BayesianRidge rolling imputer for *variables* in-place."""
+    for var in variables:
+        if var not in result.columns:
+            continue
+
+        tier_num = tier_membership.get(var, 0)
+        tier_weights = None
+        if tier_num > 0 and tier_num in tier_weight_columns:
+            tier_weights = result[tier_weight_columns[tier_num]]
+
+        estimated, confidence = _estimate_variable_rolling(
+            result, var, tier_weights,
+        )
+
+        n_estimated = estimated.notna().sum()
+        if n_estimated > 0:
+            coverage.pass2_estimates[var] = int(n_estimated)
+
+        _build_estimation_columns(result, var, estimated, confidence)
+
+
+def _run_pass2_vae(
+    result: pd.DataFrame,
+    variables: list[str],
+    tier_membership: dict[str, int],
+    tier_weight_columns: dict[int, str],
+    coverage: EstimationCoverage,
+) -> bool:
+    """Run the VAE imputer for *variables* in-place.
+
+    Returns True if the VAE succeeded, False if it fell back.
+    """
+    try:
+        from operator1.estimation.vae_imputer import (
+            train_and_impute_vae,
+            _check_torch_available,
+        )
+    except ImportError:
+        logger.warning("VAE imputer module not available -- falling back to BayesianRidge")
+        _run_pass2_bayesian_ridge(
+            result, variables, tier_membership, tier_weight_columns, coverage,
+        )
+        return False
+
+    if not _check_torch_available():
+        logger.warning("torch not installed -- falling back to BayesianRidge")
+        _run_pass2_bayesian_ridge(
+            result, variables, tier_membership, tier_weight_columns, coverage,
+        )
+        return False
+
+    # Select feature columns (same logic as BayesianRidge path)
+    feature_cols = _get_feature_columns(result, variables[0])
+
+    # Build tier weight mapping
+    tier_weights_map: dict[str, pd.Series] = {}
+    for var in variables:
+        tier_num = tier_membership.get(var, 0)
+        if tier_num > 0 and tier_num in tier_weight_columns:
+            tier_weights_map[var] = result[tier_weight_columns[tier_num]]
+
+    # Load VAE hyperparameters from config
+    try:
+        global_cfg = load_config("global_config")
+    except Exception:
+        global_cfg = {}
+
+    try:
+        vae_result = train_and_impute_vae(
+            df=result,
+            target_vars=variables,
+            feature_cols=feature_cols,
+            tier_weights=tier_weights_map if tier_weights_map else None,
+            latent_dim=int(global_cfg.get("vae_latent_dim", 8)),
+            hidden_dim=int(global_cfg.get("vae_hidden_dim", 32)),
+            epochs=int(global_cfg.get("vae_epochs", 80)),
+            kl_weight=float(global_cfg.get("vae_kl_weight", 0.5)),
+        )
+    except Exception as exc:
+        logger.warning("VAE training failed (%s) -- falling back to BayesianRidge", exc)
+        _run_pass2_bayesian_ridge(
+            result, variables, tier_membership, tier_weight_columns, coverage,
+        )
+        return False
+
+    if vae_result.fallback_used:
+        logger.info("VAE had insufficient data -- falling back to BayesianRidge")
+        _run_pass2_bayesian_ridge(
+            result, variables, tier_membership, tier_weight_columns, coverage,
+        )
+        return False
+
+    # Apply VAE estimates to the result DataFrame
+    for var in variables:
+        estimated = vae_result.estimated_values.get(
+            var, pd.Series(np.nan, index=result.index),
+        )
+        confidence = vae_result.confidence_scores.get(
+            var, pd.Series(np.nan, index=result.index),
+        )
+
+        n_estimated = estimated.notna().sum()
+        if n_estimated > 0:
+            coverage.pass2_estimates[var] = int(n_estimated)
+
+        _build_estimation_columns(result, var, estimated, confidence)
+
+    logger.info(
+        "VAE Pass 2 complete: train_loss=%.6f, %d train rows, %d features",
+        vae_result.train_loss_final,
+        vae_result.n_train_rows,
+        vae_result.n_features_used,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -521,6 +658,7 @@ def run_estimation(
     df: pd.DataFrame,
     variables: tuple[str, ...] | list[str] | None = None,
     hierarchy_config: dict[str, Any] | None = None,
+    imputer_method: str | None = None,
 ) -> tuple[pd.DataFrame, EstimationCoverage]:
     """Run the full two-pass estimation pipeline.
 
@@ -534,6 +672,10 @@ def run_estimation(
         ``ESTIMABLE_VARIABLES``.
     hierarchy_config:
         Override survival hierarchy config.
+    imputer_method:
+        Pass 2 imputer backend: ``"bayesian_ridge"`` (default) or
+        ``"vae"``.  When *None*, reads from ``global_config.yml``
+        key ``estimation_imputer``.
 
     Returns
     -------
@@ -545,6 +687,14 @@ def run_estimation(
 
     # Filter to variables actually present
     variables = [v for v in variables if v in df.columns]
+
+    # Resolve imputer method from config if not specified
+    if imputer_method is None:
+        try:
+            global_cfg = load_config("global_config")
+            imputer_method = global_cfg.get("estimation_imputer", "bayesian_ridge")
+        except Exception:
+            imputer_method = "bayesian_ridge"
 
     result = df.copy()
     coverage = EstimationCoverage()
@@ -565,10 +715,8 @@ def run_estimation(
     coverage.pass1_fills = p1_result.fills
 
     # ------------------------------------------------------------------
-    # Pass 2: Regime-weighted rolling imputer
+    # Pass 2: Model-based imputer
     # ------------------------------------------------------------------
-    logger.info("Running Pass 2: Regime-weighted rolling imputer ...")
-
     # Build tier membership for weighting
     tier_membership = _build_tier_membership(hierarchy_config)
 
@@ -579,37 +727,61 @@ def run_estimation(
         if col in result.columns:
             tier_weight_columns[i] = col
 
-    for var in variables:
-        if var not in result.columns:
-            continue
+    # Determine which variables actually need imputation
+    vars_needing_imputation = [
+        v for v in variables
+        if v in result.columns and result[v].isna().any()
+    ]
+    vars_already_complete = [
+        v for v in variables
+        if v in result.columns and not result[v].isna().any()
+    ]
 
-        missing_count = result[var].isna().sum()
-        if missing_count == 0:
-            # No missing values -- just set observation columns
-            _build_estimation_columns(
-                result, var,
-                pd.Series(np.nan, index=result.index),
-                pd.Series(np.nan, index=result.index),
-            )
-            continue
-
-        # Get tier weight for this variable
-        tier_num = tier_membership.get(var, 0)
-        tier_weights = None
-        if tier_num > 0 and tier_num in tier_weight_columns:
-            tier_weights = result[tier_weight_columns[tier_num]]
-
-        # Estimate
-        estimated, confidence = _estimate_variable_rolling(
-            result, var, tier_weights,
+    # Set observation columns for complete variables
+    for var in vars_already_complete:
+        _build_estimation_columns(
+            result, var,
+            pd.Series(np.nan, index=result.index),
+            pd.Series(np.nan, index=result.index),
         )
 
-        n_estimated = estimated.notna().sum()
-        if n_estimated > 0:
-            coverage.pass2_estimates[var] = int(n_estimated)
-
-        # Build output columns
-        _build_estimation_columns(result, var, estimated, confidence)
+    # --- VAE imputer path ---
+    if imputer_method == "vae" and vars_needing_imputation:
+        logger.info(
+            "Running Pass 2: VAE imputer for %d variables ...",
+            len(vars_needing_imputation),
+        )
+        vae_succeeded = _run_pass2_vae(
+            result, vars_needing_imputation, tier_membership,
+            tier_weight_columns, coverage,
+        )
+        if not vae_succeeded:
+            # Fall back to BayesianRidge for any variables the VAE
+            # could not handle
+            remaining = [
+                v for v in vars_needing_imputation
+                if f"{v}_final" not in result.columns
+            ]
+            if remaining:
+                logger.info(
+                    "VAE fallback: running BayesianRidge for %d remaining "
+                    "variables", len(remaining),
+                )
+                _run_pass2_bayesian_ridge(
+                    result, remaining, tier_membership,
+                    tier_weight_columns, coverage,
+                )
+    else:
+        # --- BayesianRidge imputer path (default) ---
+        if vars_needing_imputation:
+            logger.info(
+                "Running Pass 2: BayesianRidge rolling imputer for %d "
+                "variables ...", len(vars_needing_imputation),
+            )
+            _run_pass2_bayesian_ridge(
+                result, vars_needing_imputation, tier_membership,
+                tier_weight_columns, coverage,
+            )
 
     # Record post-estimation coverage (using _final columns)
     for var in variables:

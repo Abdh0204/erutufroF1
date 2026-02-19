@@ -16,5 +16,14 @@ search_budget_global: 50      # max total Eulerpool search calls
 # Set to true to force re-fetching all data even when caches exist.
 FORCE_REBUILD: false
 
+# Estimation settings
+# Pass 2 imputer method: "bayesian_ridge" (default, linear) or "vae" (nonlinear)
+estimation_imputer: bayesian_ridge
+# VAE hyperparameters (only used when estimation_imputer is "vae")
+vae_latent_dim: 8
+vae_hidden_dim: 32
+vae_epochs: 80
+vae_kl_weight: 0.5
+
 # Logging
 log_level: INFO
