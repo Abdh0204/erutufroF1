@@ -32,8 +32,10 @@ The default remains ``"bayesian_ridge"`` for backward compatibility.
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -89,11 +91,14 @@ def _build_vae(
             self.fc_mu = nn.Linear(h_dim, z_dim)
             self.fc_logvar = nn.Linear(h_dim, z_dim)
             self.relu = nn.ReLU()
-            self.bn1 = nn.BatchNorm1d(h_dim)
+            # LayerNorm instead of BatchNorm1d to avoid single-sample
+            # batch crashes and to behave consistently during MC-Dropout
+            # inference (BatchNorm switches stats mode with train/eval).
+            self.ln1 = nn.LayerNorm(h_dim)
             self.dropout = nn.Dropout(0.1)
 
         def forward(self, x: torch.Tensor):
-            h = self.relu(self.bn1(self.fc1(x)))
+            h = self.relu(self.ln1(self.fc1(x)))
             h = self.dropout(self.relu(self.fc2(h)))
             return self.fc_mu(h), self.fc_logvar(h)
 
@@ -106,11 +111,11 @@ def _build_vae(
             self.fc2 = nn.Linear(h_dim, h_dim)
             self.fc_out = nn.Linear(h_dim, out_dim)
             self.relu = nn.ReLU()
-            self.bn1 = nn.BatchNorm1d(h_dim)
+            self.ln1 = nn.LayerNorm(h_dim)
             self.dropout = nn.Dropout(0.1)
 
         def forward(self, z: torch.Tensor):
-            h = self.relu(self.bn1(self.fc1(z)))
+            h = self.relu(self.ln1(self.fc1(z)))
             h = self.dropout(self.relu(self.fc2(h)))
             return self.fc_out(h)
 
@@ -264,7 +269,6 @@ def train_and_impute_vae(
 
     # Build the joint feature matrix: feature_cols + target_vars
     all_cols = feature_cols + [v for v in target_vars if v not in feature_cols]
-    target_indices = [all_cols.index(v) for v in target_vars if v in all_cols]
 
     # Extract numeric data, forward-fill features
     X_raw = df[all_cols].copy()
@@ -344,9 +348,10 @@ def train_and_impute_vae(
         epochs, final_loss, n_train, input_dim,
     )
 
-    # --- Imputation pass ---
-    model.eval()
+    # --- Save trained model to cache for reuse ---
+    _save_vae_model(model, means, stds, all_cols, input_dim, latent_dim, hidden_dim)
 
+    # --- Imputation pass ---
     # Find rows that need imputation: at least one target var missing
     any_missing_mask = df[target_vars].isna().any(axis=1) & feature_valid_mask
 
@@ -355,21 +360,26 @@ def train_and_impute_vae(
         return result
 
     # Prepare input for missing rows: use observed features, fill missing
-    # targets with 0 (will be replaced by decoder output)
+    # targets with the column mean (less biased than zero after normalization)
     X_impute_raw = X_raw.loc[any_missing_mask].copy()
     for v in target_vars:
-        X_impute_raw[v] = X_impute_raw[v].fillna(0.0)
+        col_mean = df[v].mean() if df[v].notna().any() else 0.0
+        X_impute_raw[v] = X_impute_raw[v].fillna(col_mean)
 
     X_impute_vals = X_impute_raw.values.astype(np.float64)
     X_impute_norm = (X_impute_vals - means) / stds
     X_impute_tensor = torch.tensor(X_impute_norm, dtype=torch.float32)
 
     with torch.no_grad():
-        # Run multiple forward passes for uncertainty estimation
+        # MC-Dropout: enable dropout layers only (not LayerNorm)
+        # by manually setting each dropout submodule to train mode.
+        model.eval()
+        for m in model.modules():
+            if isinstance(m, torch.nn.Dropout):
+                m.train()
+
         n_mc_samples = 20
         predictions = []
-
-        model.train()  # enable dropout for MC-Dropout uncertainty
         for _ in range(n_mc_samples):
             recon, _, _ = model(X_impute_tensor)
             predictions.append(recon.numpy())
@@ -423,3 +433,106 @@ def train_and_impute_vae(
     )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Model caching
+# ---------------------------------------------------------------------------
+
+_VAE_CACHE_DIR = os.path.join("cache", "vae_model")
+
+
+def _save_vae_model(
+    model,
+    means: np.ndarray,
+    stds: np.ndarray,
+    columns: list[str],
+    input_dim: int,
+    latent_dim: int,
+    hidden_dim: int,
+) -> None:
+    """Persist the trained VAE and normalization params to disk.
+
+    Saved to ``cache/vae_model/`` so that subsequent pipeline runs
+    with ``FORCE_REBUILD=false`` can reload instead of retraining.
+    """
+    try:
+        import torch
+
+        os.makedirs(_VAE_CACHE_DIR, exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(_VAE_CACHE_DIR, "vae_weights.pt"))
+        np.savez(
+            os.path.join(_VAE_CACHE_DIR, "vae_norm.npz"),
+            means=means,
+            stds=stds,
+            input_dim=np.array([input_dim]),
+            latent_dim=np.array([latent_dim]),
+            hidden_dim=np.array([hidden_dim]),
+        )
+        # Save column order for validation on reload
+        with open(os.path.join(_VAE_CACHE_DIR, "vae_columns.txt"), "w") as f:
+            f.write("\n".join(columns))
+        logger.info("VAE model cached to %s", _VAE_CACHE_DIR)
+    except Exception as exc:
+        logger.debug("Failed to cache VAE model: %s", exc)
+
+
+def load_cached_vae_model(
+    expected_columns: list[str] | None = None,
+):
+    """Load a previously cached VAE model if available.
+
+    Parameters
+    ----------
+    expected_columns : list[str] | None
+        If provided, validates that the cached model was trained on
+        the same column set.  Returns None on mismatch.
+
+    Returns
+    -------
+    tuple or None
+        ``(model, means, stds, columns)`` if cache is valid, else None.
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    weights_path = os.path.join(_VAE_CACHE_DIR, "vae_weights.pt")
+    norm_path = os.path.join(_VAE_CACHE_DIR, "vae_norm.npz")
+    cols_path = os.path.join(_VAE_CACHE_DIR, "vae_columns.txt")
+
+    if not (os.path.exists(weights_path) and os.path.exists(norm_path)):
+        return None
+
+    try:
+        norm_data = np.load(norm_path)
+        means = norm_data["means"]
+        stds = norm_data["stds"]
+        input_dim = int(norm_data["input_dim"][0])
+        latent_dim = int(norm_data["latent_dim"][0])
+        hidden_dim = int(norm_data["hidden_dim"][0])
+
+        # Validate columns if provided
+        if os.path.exists(cols_path) and expected_columns is not None:
+            with open(cols_path) as f:
+                cached_cols = f.read().strip().split("\n")
+            if cached_cols != expected_columns:
+                logger.debug("VAE cache column mismatch -- retraining")
+                return None
+
+        model = _build_vae(input_dim, latent_dim, hidden_dim)
+        model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+        model.eval()
+
+        cached_cols = []
+        if os.path.exists(cols_path):
+            with open(cols_path) as f:
+                cached_cols = f.read().strip().split("\n")
+
+        logger.info("Loaded cached VAE model from %s", _VAE_CACHE_DIR)
+        return model, means, stds, cached_cols
+
+    except Exception as exc:
+        logger.debug("Failed to load cached VAE: %s", exc)
+        return None

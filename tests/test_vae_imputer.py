@@ -381,5 +381,85 @@ class TestEstimationWithVAE(unittest.TestCase):
         self.assertIn("revenue_final", result_df.columns)
 
 
+# ===========================================================================
+# Cache tests
+# ===========================================================================
+
+class TestVAEModelCache(unittest.TestCase):
+    """Test VAE model caching and reloading."""
+
+    def setUp(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("torch not available")
+
+    def test_load_cached_model_returns_none_when_no_cache(self):
+        """Should return None when no cache directory exists."""
+        from operator1.estimation.vae_imputer import load_cached_vae_model
+
+        import operator1.estimation.vae_imputer as vae_mod
+        original_dir = vae_mod._VAE_CACHE_DIR
+        vae_mod._VAE_CACHE_DIR = "/tmp/nonexistent_vae_cache_xyz"
+        try:
+            result = load_cached_vae_model()
+            self.assertIsNone(result)
+        finally:
+            vae_mod._VAE_CACHE_DIR = original_dir
+
+    def test_save_and_load_roundtrip(self):
+        """A saved model should be loadable with matching columns."""
+        import tempfile
+        import operator1.estimation.vae_imputer as vae_mod
+        from operator1.estimation.vae_imputer import (
+            _build_vae, _save_vae_model, load_cached_vae_model,
+        )
+
+        original_dir = vae_mod._VAE_CACHE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vae_mod._VAE_CACHE_DIR = tmpdir
+
+            model = _build_vae(input_dim=5, latent_dim=2, hidden_dim=8)
+            means = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+            stds = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+            columns = ["a", "b", "c", "d", "e"]
+
+            _save_vae_model(model, means, stds, columns, 5, 2, 8)
+
+            loaded = load_cached_vae_model(expected_columns=columns)
+            self.assertIsNotNone(loaded)
+            loaded_model, loaded_means, loaded_stds, loaded_cols = loaded
+            np.testing.assert_array_almost_equal(loaded_means, means)
+            np.testing.assert_array_almost_equal(loaded_stds, stds)
+            self.assertEqual(loaded_cols, columns)
+
+            vae_mod._VAE_CACHE_DIR = original_dir
+
+    def test_load_rejects_column_mismatch(self):
+        """Cache should be rejected if columns don't match."""
+        import tempfile
+        import operator1.estimation.vae_imputer as vae_mod
+        from operator1.estimation.vae_imputer import (
+            _build_vae, _save_vae_model, load_cached_vae_model,
+        )
+
+        original_dir = vae_mod._VAE_CACHE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vae_mod._VAE_CACHE_DIR = tmpdir
+
+            model = _build_vae(input_dim=5, latent_dim=2, hidden_dim=8)
+            means = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+            stds = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+            columns = ["a", "b", "c", "d", "e"]
+
+            _save_vae_model(model, means, stds, columns, 5, 2, 8)
+
+            # Try loading with different columns
+            loaded = load_cached_vae_model(expected_columns=["x", "y", "z"])
+            self.assertIsNone(loaded)
+
+            vae_mod._VAE_CACHE_DIR = original_dir
+
+
 if __name__ == "__main__":
     unittest.main()
