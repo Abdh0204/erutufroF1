@@ -5,6 +5,14 @@ interface (get_profile, get_quotes, get_income_statement, ...) so the
 rest of the pipeline can use either provider transparently.
 
 API docs: https://eodhd.com/financial-apis/
+
+Key differences from Eulerpool handled internally:
+- EODHD uses ``TICKER.EXCHANGE`` identifiers instead of ISINs.
+  ISINs are resolved via the ``/search/`` endpoint with session caching.
+- Financial statements live under a single ``/fundamentals/`` response,
+  so we cache the full response per-entity to avoid redundant API calls.
+- Column names differ from Eulerpool/FMP; normalisation is applied so
+  the cache builder's ``_build_column_rename_map`` can do the rest.
 """
 
 from __future__ import annotations
@@ -20,9 +28,52 @@ from operator1.http_utils import cached_get, HTTPError
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Internal ISIN -> ticker.exchange cache (in-memory, per-session)
+# In-memory session caches
 # ---------------------------------------------------------------------------
 _isin_symbol_cache: dict[str, str] = {}
+_fundamentals_cache: dict[str, dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# EOD -> canonical column name mapping
+# ---------------------------------------------------------------------------
+# Maps EODHD field names to the camelCase names already handled by
+# cache_builder._build_column_rename_map.  This ensures the financial
+# statement DataFrames produced by EODClient can flow through the
+# existing pipeline without modification.
+_EOD_FIELD_MAP: dict[str, str] = {
+    # Income Statement
+    "totalRevenue": "totalRevenue",
+    "grossProfit": "grossProfit",
+    "operatingIncome": "operatingIncome",
+    "ebitda": "ebitda",
+    "netIncome": "netIncome",
+    "interestExpense": "interestExpense",
+    "incomeTaxExpense": "incomeTaxExpense",
+    # Balance Sheet -- EOD variants
+    "totalAssets": "totalAssets",
+    "totalLiab": "totalLiabilities",
+    "totalCurrentLiabilities": "totalCurrentLiabilities",
+    "totalCurrentAssets": "totalCurrentAssets",
+    "totalStockholderEquity": "totalStockholdersEquity",
+    "shortTermDebt": "shortTermDebt",
+    "longTermDebt": "longTermDebt",
+    "longTermDebtTotal": "longTermDebt",
+    "cash": "cashAndCashEquivalents",
+    "cashAndShortTermInvestments": "cashAndShortTermInvestments",
+    "cashAndEquivalents": "cashAndCashEquivalents",
+    "netReceivables": "netReceivables",
+    "shortLongTermDebt": "shortTermDebt",
+    # Cash Flow -- EOD variants
+    "totalCashFromOperatingActivities": "operatingCashFlow",
+    "capitalExpenditures": "capitalExpenditure",
+    "totalCashflowsFromInvestingActivities": "investingActivitiesCashflow",
+    "totalCashFromFinancingActivities": "financingActivitiesCashflow",
+    "dividendsPaid": "dividendsPaid",
+    "paymentOfDividends": "dividendsPaid",
+    # Common fields already matching
+    "sharesOutstanding": "sharesOutstanding",
+    "marketCapitalization": "marketCap",
+}
 
 
 class EODAPIError(Exception):
@@ -57,7 +108,12 @@ class EODClient:
     # ------------------------------------------------------------------
 
     def _get(self, path: str, extra_params: dict[str, str] | None = None) -> Any:
-        """Execute a cached GET with the API token injected."""
+        """Execute a cached GET with the API token injected.
+
+        The ``api_token`` and ``fmt=json`` parameters are appended
+        automatically.  Additional query parameters can be passed via
+        *extra_params*.
+        """
         url = f"{self._base_url}{path}"
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}api_token={self._api_key}&fmt=json"
@@ -69,6 +125,25 @@ class EODClient:
         except HTTPError as exc:
             raise EODAPIError(path, str(exc)) from exc
 
+    def _get_fundamentals(self, code: str) -> dict[str, Any]:
+        """Fetch fundamentals for *code*, with per-session in-memory caching.
+
+        The EODHD ``/fundamentals/`` endpoint returns profile, financials,
+        officers, and peers in a single response.  Multiple methods
+        (get_profile, get_income_statement, get_peers, ...) all need this
+        data, so we cache the parsed response per ``code`` to avoid
+        redundant HTTP round-trips and disk-cache lookups.
+        """
+        if code in _fundamentals_cache:
+            return _fundamentals_cache[code]
+
+        data = self._get(f"/fundamentals/{code}")
+        if not isinstance(data, dict):
+            data = {}
+
+        _fundamentals_cache[code] = data
+        return data
+
     @staticmethod
     def _to_dataframe(records: list[dict], date_col: str | None = None) -> pd.DataFrame:
         """Convert a list of dicts to a DataFrame, optionally parsing a date column."""
@@ -78,6 +153,20 @@ class EODClient:
         if date_col and date_col in df.columns:
             df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
             df = df.sort_values(date_col).reset_index(drop=True)
+        return df
+
+    @staticmethod
+    def _normalise_eod_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Rename EOD-specific column names to match the canonical names
+        that ``cache_builder._build_column_rename_map`` already handles.
+
+        This is the critical bridge that allows EOD data to flow through
+        the same pipeline as Eulerpool data.
+        """
+        rename = {k: v for k, v in _EOD_FIELD_MAP.items()
+                  if k in df.columns and k != v}
+        if rename:
+            df = df.rename(columns=rename)
         return df
 
     # ------------------------------------------------------------------
@@ -93,9 +182,14 @@ class EODClient:
         if isin in _isin_symbol_cache:
             return _isin_symbol_cache[isin]
 
-        candidates = self._get(f"/search/{isin}", extra_params={"type": "stock"})
+        try:
+            candidates = self._get(f"/search/{isin}", extra_params={"type": "stock"})
+        except EODAPIError:
+            logger.warning("EOD search failed for %s -- using raw ISIN as code", isin)
+            _isin_symbol_cache[isin] = isin
+            return isin
+
         if not isinstance(candidates, list) or not candidates:
-            # Fallback: try using the ISIN directly as a code
             logger.warning(
                 "EOD search returned no results for ISIN %s -- using raw ISIN as code",
                 isin,
@@ -130,11 +224,11 @@ class EODClient:
         sub_industry, name.
         """
         code = self._resolve_isin(isin)
-        data = self._get(f"/fundamentals/{code}")
+        data = self._get_fundamentals(code)
 
-        if not isinstance(data, dict):
+        if not data:
             raise EODAPIError(
-                f"/fundamentals/{code}", "Unexpected response format"
+                f"/fundamentals/{code}", "Empty or non-dict response"
             )
 
         general = data.get("General", {})
@@ -189,39 +283,54 @@ class EODClient:
     # ------------------------------------------------------------------
 
     def _get_financial(self, isin: str, statement_key: str) -> pd.DataFrame:
-        """Generic fetcher for financial statement data from fundamentals."""
-        code = self._resolve_isin(isin)
-        data = self._get(f"/fundamentals/{code}")
+        """Generic fetcher for financial statement data from fundamentals.
 
-        if not isinstance(data, dict):
+        The EODHD ``/fundamentals/`` response nests financial data as::
+
+            Financials -> <statement_key> -> quarterly -> { date_key: {row} }
+            Financials -> <statement_key> -> yearly    -> { date_key: {row} }
+
+        We flatten both period types into a single list of records,
+        normalise column names via ``_normalise_eod_columns``, and
+        return a DataFrame sorted by ``report_date``.
+        """
+        code = self._resolve_isin(isin)
+        data = self._get_fundamentals(code)
+
+        if not data:
             return pd.DataFrame()
 
         financials = data.get("Financials", {})
         statement_data = financials.get(statement_key, {})
 
-        # EOD returns statements as {period_key: {field: value, ...}}
-        # We need to flatten into a list of dicts
-        if isinstance(statement_data, dict):
-            # Could be nested by period type (quarterly/yearly)
-            records: list[dict[str, Any]] = []
-            for period_type in ("quarterly", "yearly"):
-                period_data = statement_data.get(period_type, {})
-                if isinstance(period_data, dict):
-                    for _date_key, row in period_data.items():
-                        if isinstance(row, dict):
-                            row_copy = dict(row)
-                            row_copy.setdefault("report_date", row_copy.get("date"))
-                            records.append(row_copy)
-            if not records:
-                # Maybe it's a flat dict of {date: {...}}
-                for _date_key, row in statement_data.items():
+        if not isinstance(statement_data, dict):
+            return pd.DataFrame()
+
+        records: list[dict[str, Any]] = []
+
+        # Try nested quarterly/yearly structure first
+        for period_type in ("quarterly", "yearly"):
+            period_data = statement_data.get(period_type, {})
+            if isinstance(period_data, dict):
+                for _date_key, row in period_data.items():
                     if isinstance(row, dict):
                         row_copy = dict(row)
+                        # Ensure report_date is set from the ``date`` field
                         row_copy.setdefault("report_date", row_copy.get("date"))
                         records.append(row_copy)
-            return self._to_dataframe(records, date_col="report_date")
 
-        return pd.DataFrame()
+        # Fallback: flat dict of {date: {...}} (some endpoints)
+        if not records:
+            for _date_key, row in statement_data.items():
+                if isinstance(row, dict):
+                    row_copy = dict(row)
+                    row_copy.setdefault("report_date", row_copy.get("date"))
+                    records.append(row_copy)
+
+        df = self._to_dataframe(records, date_col="report_date")
+        if not df.empty:
+            df = self._normalise_eod_columns(df)
+        return df
 
     def get_income_statement(self, isin: str) -> pd.DataFrame:
         """Fetch periodic income statement for *isin*."""
@@ -242,26 +351,25 @@ class EODClient:
     def get_peers(self, isin: str) -> list[str]:
         """Return list of peer ISINs for *isin*.
 
-        EOD doesn't have a direct peers endpoint, so we extract them
-        from the fundamentals ``Holders`` / ``General`` section, or
-        fall back to an empty list.
+        EOD doesn't have a dedicated peers endpoint.  The ``General``
+        section of fundamentals may contain a ``Peers`` list; if not,
+        returns an empty list (the pipeline's peer-fallback logic in
+        ``entity_discovery`` handles this gracefully).
         """
         code = self._resolve_isin(isin)
         try:
-            data = self._get(f"/fundamentals/{code}")
+            data = self._get_fundamentals(code)
         except EODAPIError:
             return []
 
-        if not isinstance(data, dict):
+        if not data:
             return []
 
-        # Try to extract peers from ETF or General sections
         general = data.get("General", {})
         peers_raw = general.get("Peers", [])
         if isinstance(peers_raw, list):
             return peers_raw
 
-        # Fallback: no direct peer data available from EOD
         logger.debug("No peers data available from EOD for %s", isin)
         return []
 
@@ -269,23 +377,27 @@ class EODClient:
         """Return supply-chain relationships for *isin*.
 
         EOD doesn't have a dedicated supply-chain endpoint.
-        Returns an empty list as a graceful degradation.
+        Returns an empty list -- the pipeline handles missing supply
+        chain data gracefully.
         """
         logger.debug("Supply chain data not available via EOD for %s", isin)
         return []
 
     def get_executives(self, isin: str) -> list[dict[str, Any]]:
-        """Return executives list for *isin*."""
+        """Return executives list for *isin*.
+
+        Extracted from the ``General.Officers`` section of the
+        fundamentals response.
+        """
         code = self._resolve_isin(isin)
         try:
-            data = self._get(f"/fundamentals/{code}")
+            data = self._get_fundamentals(code)
         except EODAPIError:
             return []
 
-        if not isinstance(data, dict):
+        if not data:
             return []
 
-        # Extract officer data from General section
         general = data.get("General", {})
         officers = general.get("Officers", {})
 
@@ -304,9 +416,14 @@ class EODClient:
         """Search EOD for entities matching *query*.
 
         Returns list of dicts with: name, ticker, isin, exchange,
-        country, sector, market_cap.
+        country, sector, market_cap -- matching the schema returned
+        by ``EulerportClient.search``.
         """
-        data = self._get(f"/search/{query}", extra_params={"type": "stock"})
+        try:
+            data = self._get(f"/search/{query}", extra_params={"type": "stock"})
+        except EODAPIError:
+            return []
+
         if not isinstance(data, list):
             data = []
 

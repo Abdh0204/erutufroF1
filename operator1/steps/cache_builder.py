@@ -240,6 +240,7 @@ def _build_column_rename_map(columns: list[str]) -> dict[str, str]:
     """Build a mapping from camelCase / odd API names to snake_case decision vars.
 
     Only returns mappings for columns that match known statement fields.
+    Covers Eulerpool, FMP, **and** EOD Historical Data field names.
     """
     # Common API -> canonical mappings
     known: dict[str, str] = {
@@ -252,7 +253,11 @@ def _build_column_rename_map(columns: list[str]) -> dict[str, str]:
         "incomeTaxExpense": "taxes",
         "totalAssets": "total_assets",
         "totalLiabilities": "total_liabilities",
+        # EOD may use "totalLiab" -- normalised to "totalLiabilities" by
+        # EODClient._normalise_eod_columns, but kept here as a safety net.
+        "totalLiab": "total_liabilities",
         "totalStockholdersEquity": "total_equity",
+        "totalStockholderEquity": "total_equity",  # EOD variant
         "totalEquity": "total_equity",
         "totalCurrentAssets": "current_assets",
         "currentAssets": "current_assets",
@@ -260,19 +265,27 @@ def _build_column_rename_map(columns: list[str]) -> dict[str, str]:
         "currentLiabilities": "current_liabilities",
         "cashAndCashEquivalents": "cash_and_equivalents",
         "cashAndShortTermInvestments": "cash_and_equivalents",
+        "cash": "cash_and_equivalents",  # EOD short name
         "shortTermDebt": "short_term_debt",
         "longTermDebt": "long_term_debt",
+        "longTermDebtTotal": "long_term_debt",  # EOD variant
         "netReceivables": "receivables",
         "accountsReceivable": "receivables",
         "operatingCashFlow": "operating_cash_flow",
+        "totalCashFromOperatingActivities": "operating_cash_flow",  # EOD
         "capitalExpenditure": "capex",
+        "capitalExpenditures": "capex",  # EOD variant
         "investingCashFlow": "investing_cf",
         "investingActivitiesCashflow": "investing_cf",
+        "totalCashflowsFromInvestingActivities": "investing_cf",  # EOD
         "financingCashFlow": "financing_cf",
         "financingActivitiesCashflow": "financing_cf",
+        "totalCashFromFinancingActivities": "financing_cf",  # EOD
         "dividendsPaid": "dividends_paid",
+        "paymentOfDividends": "dividends_paid",  # EOD variant
         "sharesOutstanding": "shares_outstanding",
         "marketCap": "market_cap",
+        "marketCapitalization": "market_cap",  # EOD variant
         "adjustedClose": "adjusted_close",
     }
     return {k: v for k, v in known.items() if k in columns and k != v}
