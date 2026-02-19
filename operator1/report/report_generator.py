@@ -108,65 +108,65 @@ _FALLBACK_TEMPLATE = """\
 
 ---
 
-## 10a. Supply Chain & Network Risk (Graph Theory)
+## 11. Supply Chain & Contagion Risk
 
 {graph_risk}
 
 ---
 
-## 10b. Competitive Dynamics (Game Theory)
+## 12. Competitive Landscape
 
 {game_theory}
 
 ---
 
-## 10c. Government Protection Assessment (Fuzzy Logic)
+## 13. Regulatory & Government Protection
 
 {fuzzy_protection}
 
 ---
 
-## 10d. Adaptive Learning (PID Controller)
+## 14. Model Calibration & Adaptive Learning
 
 {pid_controller}
 
 ---
 
-## 10e. News Sentiment Analysis
+## 15. Market Sentiment & News Flow
 
 {sentiment_analysis}
 
 ---
 
-## 10f. Peer Ranking & Relative Positioning
+## 16. Peer Comparison & Relative Valuation
 
 {peer_ranking}
 
 ---
 
-## 10g. Macro Environment Quadrant
+## 17. Macroeconomic Environment
 
 {macro_quadrant}
 
 ---
 
-## 11. Risk Factors & Limitations
+## 18. Risk Factors & Limitations
 
 {risk_assessment}
 
-### 11.1 LIMITATIONS
+### 18.1 LIMITATIONS
 
 {limitations}
 
 ---
 
-## 12. Investment Recommendation
+## 19. Investment Recommendation
 
 {investment_recommendation}
 
 ---
 
-## 13. Appendix
+## 20. Appendix & Methodology
 
 {appendix}
 """
@@ -1438,52 +1438,83 @@ def generate_charts(
         matplotlib.use("Agg")  # Non-interactive backend
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        from matplotlib.ticker import FuncFormatter
     except ImportError:
         logger.warning("matplotlib not installed; skipping chart generation.")
         return chart_paths
 
-    # Chart 1: Price history with regime shading
+    # Bloomberg-style chart theme
+    _CHART_BG = "#1a1a2e"
+    _CHART_FG = "#e0e0e0"
+    _CHART_GRID = "#2d2d44"
+    _CHART_ACCENT = "#00d4ff"
+    _CHART_RED = "#ff4757"
+    _CHART_GREEN = "#2ed573"
+    _CHART_GOLD = "#ffa502"
+
+    def _apply_bloomberg_style(fig, ax, title: str) -> None:
+        """Apply Bloomberg Terminal-inspired dark theme to a chart."""
+        fig.patch.set_facecolor(_CHART_BG)
+        ax.set_facecolor(_CHART_BG)
+        ax.set_title(title, color=_CHART_FG, fontsize=14, fontweight="bold", pad=12)
+        ax.tick_params(colors=_CHART_FG, labelsize=9)
+        ax.xaxis.label.set_color(_CHART_FG)
+        ax.yaxis.label.set_color(_CHART_FG)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["bottom"].set_color(_CHART_GRID)
+        ax.spines["left"].set_color(_CHART_GRID)
+        ax.grid(True, color=_CHART_GRID, alpha=0.5, linewidth=0.5)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        for label in ax.get_xticklabels():
+            label.set_rotation(45)
+            label.set_ha("right")
+
+    # Retrieve company name for chart titles
+    identity = profile.get("identity", {})
+    company = identity.get("name", identity.get("ticker", ""))
+
+    # Chart 1: Price History with Regime Overlay
     try:
         if "close" in cache.columns:
-            fig, ax = plt.subplots(figsize=(14, 6))
-            ax.plot(cache.index, cache["close"], linewidth=1, color="#333")
-            ax.set_title("Price History")
-            ax.set_ylabel("Close Price")
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+            fig, ax = plt.subplots(figsize=(16, 7))
+            ax.plot(cache.index, cache["close"], linewidth=1.5, color=_CHART_ACCENT, zorder=3)
+            _apply_bloomberg_style(fig, ax, f"{company} -- Closing Price (2Y)")
+            ax.set_ylabel("Price ($)", color=_CHART_FG)
 
-            # Regime shading
+            # Regime shading with professional colors
             if "regime_label" in cache.columns:
                 regime_colors = {
-                    "bull": "#d4edda",
-                    "bear": "#f8d7da",
-                    "high_vol": "#fff3cd",
-                    "low_vol": "#d1ecf1",
+                    "bull": (_CHART_GREEN, "Bull Market"),
+                    "bear": (_CHART_RED, "Bear Market"),
+                    "high_vol": (_CHART_GOLD, "High Volatility"),
+                    "low_vol": ("#7bed9f", "Low Volatility"),
                 }
-                for regime, color in regime_colors.items():
+                for regime, (color, label) in regime_colors.items():
                     mask = cache["regime_label"] == regime
                     if mask.any():
                         ax.fill_between(
                             cache.index,
-                            cache["close"].min(),
-                            cache["close"].max(),
-                            where=mask,
-                            alpha=0.3,
-                            color=color,
-                            label=regime,
+                            cache["close"].min() * 0.98,
+                            cache["close"].max() * 1.02,
+                            where=mask, alpha=0.15, color=color, label=label,
                         )
-                ax.legend(loc="upper left", fontsize=8)
+                leg = ax.legend(
+                    loc="upper left", fontsize=9, facecolor=_CHART_BG,
+                    edgecolor=_CHART_GRID, labelcolor=_CHART_FG,
+                )
 
             fig.tight_layout()
             path = str(out / "price_history.png")
-            fig.savefig(path, dpi=150)
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
             plt.close(fig)
             chart_paths.append(path)
             logger.info("Generated chart: %s", path)
     except Exception as exc:
         logger.warning("Failed to generate price history chart: %s", exc)
 
-    # Chart 2: Survival timeline
+    # Chart 2: Survival Mode Timeline
     try:
         flag_cols = [
             c for c in (
@@ -1494,78 +1525,141 @@ def generate_charts(
             if c in cache.columns
         ]
         if flag_cols:
-            fig, ax = plt.subplots(figsize=(14, 4))
+            nice_labels = {
+                "company_survival_mode_flag": "Company Distress",
+                "country_survival_mode_flag": "Country Crisis",
+                "country_protected_flag": "Government Protection",
+            }
+            fig, ax = plt.subplots(figsize=(16, 4))
+            colors = [_CHART_RED, _CHART_GOLD, _CHART_GREEN]
             for i, col in enumerate(flag_cols):
                 ax.fill_between(
-                    cache.index,
-                    i,
-                    i + cache[col].fillna(0).astype(float),
-                    alpha=0.7,
-                    label=col.replace("_", " ").title(),
+                    cache.index, i, i + cache[col].fillna(0).astype(float),
+                    alpha=0.7, color=colors[i % len(colors)],
+                    label=nice_labels.get(col, col),
                 )
             ax.set_yticks(range(len(flag_cols)))
-            ax.set_yticklabels([c.replace("_", " ").title() for c in flag_cols])
-            ax.set_title("Survival Flag Timeline")
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-            ax.legend(loc="upper right", fontsize=8)
+            ax.set_yticklabels([nice_labels.get(c, c) for c in flag_cols], fontsize=10)
+            _apply_bloomberg_style(fig, ax, f"{company} -- Survival Mode Timeline")
+            leg = ax.legend(
+                loc="upper right", fontsize=9, facecolor=_CHART_BG,
+                edgecolor=_CHART_GRID, labelcolor=_CHART_FG,
+            )
             fig.tight_layout()
             path = str(out / "survival_timeline.png")
-            fig.savefig(path, dpi=150)
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
             plt.close(fig)
             chart_paths.append(path)
             logger.info("Generated chart: %s", path)
     except Exception as exc:
         logger.warning("Failed to generate survival timeline chart: %s", exc)
 
-    # Chart 3: Hierarchy weight evolution
+    # Chart 3: Risk Hierarchy Weight Allocation
     try:
         tier_cols = [
             f"hierarchy_tier{i}_weight" for i in range(1, 6)
             if f"hierarchy_tier{i}_weight" in cache.columns
         ]
         if tier_cols:
-            fig, ax = plt.subplots(figsize=(14, 5))
+            tier_names = [
+                "Tier 1: Liquidity", "Tier 2: Solvency", "Tier 3: Stability",
+                "Tier 4: Profitability", "Tier 5: Growth",
+            ]
+            tier_colors = ["#00d4ff", "#2ed573", "#ffa502", "#ff6348", "#a4b0be"]
+            fig, ax = plt.subplots(figsize=(16, 5))
             ax.stackplot(
                 cache.index,
                 *[cache[c].fillna(0) for c in tier_cols],
-                labels=[f"Tier {i}" for i in range(1, len(tier_cols) + 1)],
-                alpha=0.8,
+                labels=tier_names[:len(tier_cols)],
+                colors=tier_colors[:len(tier_cols)],
+                alpha=0.85,
             )
-            ax.set_title("Hierarchy Weight Evolution")
-            ax.set_ylabel("Weight")
+            _apply_bloomberg_style(fig, ax, f"{company} -- Risk Hierarchy Weight Allocation")
+            ax.set_ylabel("Portfolio Weight", color=_CHART_FG)
             ax.set_ylim(0, 1.05)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-            ax.legend(loc="upper right", fontsize=8)
+            leg = ax.legend(
+                loc="upper right", fontsize=9, facecolor=_CHART_BG,
+                edgecolor=_CHART_GRID, labelcolor=_CHART_FG,
+            )
             fig.tight_layout()
             path = str(out / "hierarchy_weights.png")
-            fig.savefig(path, dpi=150)
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
             plt.close(fig)
             chart_paths.append(path)
             logger.info("Generated chart: %s", path)
     except Exception as exc:
         logger.warning("Failed to generate hierarchy weight chart: %s", exc)
 
-    # Chart 4: Volatility with regime
+    # Chart 4: 21-Day Realized Volatility
     try:
         if "volatility_21d" in cache.columns:
-            fig, ax = plt.subplots(figsize=(14, 5))
-            ax.plot(
-                cache.index,
-                cache["volatility_21d"],
-                linewidth=1,
-                color="#e74c3c",
+            fig, ax = plt.subplots(figsize=(16, 5))
+            ax.fill_between(
+                cache.index, 0, cache["volatility_21d"],
+                alpha=0.3, color=_CHART_RED,
             )
-            ax.set_title("21-Day Rolling Volatility")
-            ax.set_ylabel("Volatility")
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+            ax.plot(cache.index, cache["volatility_21d"], linewidth=1.2, color=_CHART_RED)
+            _apply_bloomberg_style(fig, ax, f"{company} -- 21-Day Realized Volatility")
+            ax.set_ylabel("Annualized Volatility", color=_CHART_FG)
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0%}"))
             fig.tight_layout()
             path = str(out / "volatility.png")
-            fig.savefig(path, dpi=150)
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
             plt.close(fig)
             chart_paths.append(path)
             logger.info("Generated chart: %s", path)
     except Exception as exc:
         logger.warning("Failed to generate volatility chart: %s", exc)
+
+    # Chart 5: Financial Health Composite Score
+    try:
+        if "fh_composite_score" in cache.columns:
+            fig, ax = plt.subplots(figsize=(16, 5))
+            score = cache["fh_composite_score"]
+            ax.plot(cache.index, score, linewidth=1.5, color=_CHART_GREEN, zorder=3)
+            ax.axhline(y=50, color=_CHART_FG, linestyle="--", alpha=0.3, label="Neutral (50)")
+            ax.fill_between(cache.index, 0, score, where=score >= 50,
+                            alpha=0.15, color=_CHART_GREEN)
+            ax.fill_between(cache.index, 0, score, where=score < 50,
+                            alpha=0.15, color=_CHART_RED)
+            _apply_bloomberg_style(fig, ax, f"{company} -- Financial Health Composite (0-100)")
+            ax.set_ylabel("Health Score", color=_CHART_FG)
+            ax.set_ylim(0, 100)
+            fig.tight_layout()
+            path = str(out / "financial_health.png")
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
+            plt.close(fig)
+            chart_paths.append(path)
+            logger.info("Generated chart: %s", path)
+    except Exception as exc:
+        logger.warning("Failed to generate financial health chart: %s", exc)
+
+    # Chart 6: News Sentiment & Momentum
+    try:
+        if "sentiment_score" in cache.columns and cache["sentiment_score"].notna().any():
+            fig, ax = plt.subplots(figsize=(16, 5))
+            sent = cache["sentiment_score"]
+            ax.bar(cache.index, sent, width=1.0, alpha=0.4,
+                   color=[_CHART_GREEN if v >= 0 else _CHART_RED for v in sent.fillna(0)])
+            if "sentiment_momentum_21d" in cache.columns:
+                ax.plot(cache.index, cache["sentiment_momentum_21d"],
+                        linewidth=2, color=_CHART_GOLD, label="21-Day Sentiment Trend")
+            ax.axhline(y=0, color=_CHART_FG, linewidth=0.5, alpha=0.5)
+            _apply_bloomberg_style(fig, ax, f"{company} -- Market Sentiment & News Flow")
+            ax.set_ylabel("Sentiment (-1 Bearish to +1 Bullish)", color=_CHART_FG)
+            ax.set_ylim(-1.1, 1.1)
+            leg = ax.legend(
+                loc="upper left", fontsize=9, facecolor=_CHART_BG,
+                edgecolor=_CHART_GRID, labelcolor=_CHART_FG,
+            )
+            fig.tight_layout()
+            path = str(out / "sentiment.png")
+            fig.savefig(path, dpi=180, facecolor=_CHART_BG)
+            plt.close(fig)
+            chart_paths.append(path)
+            logger.info("Generated chart: %s", path)
+    except Exception as exc:
+        logger.warning("Failed to generate sentiment chart: %s", exc)
 
     return chart_paths
 
