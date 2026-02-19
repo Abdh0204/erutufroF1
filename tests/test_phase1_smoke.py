@@ -37,6 +37,14 @@ class TestImports(unittest.TestCase):
         from operator1.clients.eulerpool import EulerportClient, EulerportAPIError
         self.assertTrue(callable(EulerportClient))
 
+    def test_eod_client_import(self):
+        from operator1.clients.eod import EODClient, EODAPIError
+        self.assertTrue(callable(EODClient))
+
+    def test_equity_provider_import(self):
+        from operator1.clients.equity_provider import EquityProvider, create_equity_provider
+        self.assertTrue(callable(create_equity_provider))
+
     def test_fmp_client_import(self):
         from operator1.clients.fmp import FMPClient, FMPAPIError
         self.assertTrue(callable(FMPClient))
@@ -130,8 +138,31 @@ class TestSecretsLoader(unittest.TestCase):
         self.assertEqual(secrets["FMP_API_KEY"], "test_fmp")
         self.assertEqual(secrets["GEMINI_API_KEY"], "test_gemini")
 
+    @patch.dict("os.environ", {
+        "EOD_API_KEY": "test_eod",
+        "FMP_API_KEY": "test_fmp",
+        "GEMINI_API_KEY": "test_gemini",
+    })
+    def test_load_eod_from_env(self):
+        """EOD_API_KEY should be accepted as alternative to EULERPOOL_API_KEY."""
+        from operator1.secrets_loader import load_secrets
+        secrets = load_secrets()
+        self.assertEqual(secrets["EOD_API_KEY"], "test_eod")
+        self.assertEqual(secrets["FMP_API_KEY"], "test_fmp")
+        self.assertNotIn("EULERPOOL_API_KEY", secrets)
+
     @patch.dict("os.environ", {}, clear=True)
     def test_missing_keys_raises(self):
+        from operator1.secrets_loader import load_secrets
+        with self.assertRaises(SystemExit):
+            load_secrets()
+
+    @patch.dict("os.environ", {
+        "FMP_API_KEY": "test_fmp",
+        "GEMINI_API_KEY": "test_gemini",
+    }, clear=True)
+    def test_missing_equity_key_raises(self):
+        """Pipeline should fail if neither EULERPOOL nor EOD key is set."""
         from operator1.secrets_loader import load_secrets
         with self.assertRaises(SystemExit):
             load_secrets()
