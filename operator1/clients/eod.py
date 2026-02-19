@@ -253,7 +253,13 @@ class EODClient:
         """Fetch daily quote series for *identifier* (ISIN or ticker).
 
         Returns DataFrame with columns: date, open, high, low, close,
-        volume, adjusted_close.
+        volume, adjusted_close, market_cap, shares_outstanding.
+
+        Note: ``vwap`` is not available from EOD's daily endpoint.
+        ``market_cap`` and ``shares_outstanding`` are sourced from the
+        fundamentals ``General`` section and applied as static values
+        (they don't change daily but having them is better than leaving
+        them null for downstream survival mode and valuation calculations).
         """
         code = self._resolve_isin(identifier)
         data = self._get(f"/eod/{code}")
@@ -276,6 +282,32 @@ class EODClient:
             "date": "date",
         }
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+
+        # Enrich with market_cap and shares_outstanding from fundamentals.
+        # These are static snapshots (not daily) but are needed by the
+        # cache builder for country_protection (market_cap > 0.1% GDP)
+        # and valuation ratios (pe_ratio, ps_ratio, enterprise_value).
+        try:
+            fund_data = self._get_fundamentals(code)
+            general = fund_data.get("General", {}) if fund_data else {}
+            highlights = fund_data.get("Highlights", {}) if fund_data else {}
+
+            mkt_cap = highlights.get("MarketCapitalization") or general.get(
+                "MarketCapitalization"
+            )
+            shares = general.get("SharesOutstanding") or highlights.get(
+                "SharesOutstanding"
+            )
+
+            if mkt_cap is not None:
+                df["market_cap"] = float(mkt_cap)
+            if shares is not None:
+                df["shares_outstanding"] = float(shares)
+        except Exception as exc:
+            logger.debug(
+                "Could not enrich quotes with market_cap/shares: %s", exc
+            )
+
         return df
 
     # ------------------------------------------------------------------
